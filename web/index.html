@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Rattlegram Station</title>
+<style>
+:root{
+  --bg:#0d1117; --panel:#161b22; --panel2:#1c232c; --edge:#2b3440;
+  --ink:#e6edf3; --dim:#9fb0c0; --accent:#4cc9f0; --accent2:#f72585;
+  --ok:#3fb950; --warn:#d29922; --bad:#f85149; --band:rgba(76,201,240,.22);
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+}
+:root:not([data-theme="dark"]) @media (prefers-color-scheme: light){}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.5}
+header{padding:18px 16px 6px;border-bottom:1px solid var(--edge)}
+h1{margin:0;font-size:20px;letter-spacing:.3px}
+h1 span{color:var(--accent)}
+.sub{color:var(--dim);font-size:13px;margin-top:2px}
+.wrap{max-width:860px;margin:0 auto;padding:16px}
+nav{display:flex;gap:4px;flex-wrap:wrap;margin:8px 0 16px}
+nav button{background:var(--panel);color:var(--dim);border:1px solid var(--edge);border-radius:8px;
+  padding:8px 14px;font-size:14px;cursor:pointer;font-family:var(--sans)}
+nav button.on{background:var(--panel2);color:var(--ink);border-color:var(--accent)}
+.card{background:var(--panel);border:1px solid var(--edge);border-radius:12px;padding:16px;margin-bottom:14px}
+.card h2{margin:0 0 4px;font-size:15px}
+.card p.hint{color:var(--dim);font-size:13px;margin:0 0 12px}
+label{display:block;font-size:12px;color:var(--dim);margin:10px 0 4px;text-transform:uppercase;letter-spacing:.4px}
+input[type=text],textarea,select{width:100%;background:var(--bg);color:var(--ink);border:1px solid var(--edge);
+  border-radius:8px;padding:10px;font-family:var(--mono);font-size:14px}
+textarea{resize:vertical;min-height:70px}
+.row{display:flex;gap:12px;flex-wrap:wrap}
+.row>div{flex:1;min-width:130px}
+button.go{background:var(--accent);color:#04202b;border:none;border-radius:8px;padding:11px 18px;
+  font-size:14px;font-weight:650;cursor:pointer;font-family:var(--sans)}
+button.go:disabled{opacity:.4;cursor:default}
+button.go.rec{background:var(--accent2);color:#2a0012}
+button.ghost{background:transparent;color:var(--accent);border:1px solid var(--edge);border-radius:8px;
+  padding:10px 14px;font-size:13px;cursor:pointer}
+.btns{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;align-items:center}
+.chk{display:flex;align-items:center;gap:8px;margin-top:10px}
+.chk input{width:auto}
+.chk label{margin:0;text-transform:none;letter-spacing:0;font-size:13px;color:var(--ink)}
+.meter{height:8px;background:var(--bg);border:1px solid var(--edge);border-radius:5px;overflow:hidden;margin-top:6px}
+.meter>i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--ok),var(--warn),var(--bad))}
+.cap{font-size:12px;color:var(--dim);margin-top:6px}
+.cap b{color:var(--ink)}
+.log{font-family:var(--mono);font-size:13px;max-height:260px;overflow:auto;margin-top:10px}
+.msg{border-left:3px solid var(--accent);background:var(--panel2);padding:8px 10px;border-radius:0 8px 8px 0;margin:8px 0}
+.msg .meta{color:var(--dim);font-size:11px}
+.msg.fail{border-color:var(--bad)}
+.msg.enc{border-color:var(--ok)}
+canvas{width:100%;height:150px;display:block;background:var(--bg);border:1px solid var(--edge);border-radius:8px;margin-top:10px}
+.pill{display:inline-block;font-size:11px;padding:2px 8px;border-radius:20px;background:var(--panel2);
+  border:1px solid var(--edge);color:var(--dim);margin-left:6px}
+.pill.ok{color:var(--ok);border-color:var(--ok)}
+.pill.bad{color:var(--bad);border-color:var(--bad)}
+.status{font-size:13px;color:var(--dim);min-height:18px;margin-top:8px}
+table.lim{width:100%;border-collapse:collapse;font-size:13px}
+table.lim td{padding:6px 8px;border-bottom:1px solid var(--edge);vertical-align:top}
+table.lim td:first-child{color:var(--dim);white-space:nowrap}
+code{background:var(--panel2);padding:1px 5px;border-radius:4px;font-size:12px}
+a{color:var(--accent)}
+.warnbox{border:1px solid var(--warn);background:rgba(210,153,34,.08);border-radius:8px;padding:10px 12px;font-size:13px;color:var(--ink)}
+.hide{display:none}
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap" style="padding-bottom:0">
+    <h1><span>▚</span> Rattlegram Station</h1>
+    <div class="sub">Text over sound — encode, decode, and coexist with music. Same wire format as the aicodix app.</div>
+  </div>
+</header>
+<div class="wrap">
+  <nav>
+    <button data-tab="rx" class="on">Receive</button>
+    <button data-tab="tx">Send</button>
+    <button data-tab="hide">Hide in audio</button>
+    <button data-tab="about">Limits &amp; law</button>
+  </nav>
+
+  <div id="load" class="card">Loading signal engine…</div>
+
+  <!-- RECEIVE -->
+  <section id="rx" class="card hide">
+    <h2>Receive <span id="rxstate" class="pill">idle</span></h2>
+    <p class="hint">Click Listen, allow the mic, and hold your phone near the computer while it transmits a rattlegram.</p>
+    <div class="btns">
+      <button id="rxbtn" class="go">Listen</button>
+      <span class="status" id="rxstatus"></span>
+    </div>
+    <div class="meter"><i id="rxlevel"></i></div>
+    <label>Decrypt with passphrase (leave blank for plain messages)</label>
+    <input type="text" id="rxkey" placeholder="shared passphrase">
+    <div class="log" id="rxlog"></div>
+  </section>
+
+  <!-- SEND -->
+  <section id="tx" class="card hide">
+    <h2>Send</h2>
+    <p class="hint">Type a message, press Transmit, and point the speaker at the receiving device.</p>
+    <label>Message</label>
+    <textarea id="txmsg" placeholder="hello over the air">hello from rattlegram station</textarea>
+    <div class="cap">Payload <b id="txbytes">0</b> / <span id="txcap">170</span> bytes · mode <b id="txmode">—</b></div>
+    <div class="row">
+      <div><label>Callsign (≤9, A–Z 0–9)</label><input type="text" id="txcall" value="N0CALL" maxlength="9"></div>
+      <div><label>Carrier (Hz)</label><input type="text" id="txcarrier" value="1500"></div>
+    </div>
+    <div class="chk"><input type="checkbox" id="txvox"><label>Leading noise for VOX radios (opens squelch before data)</label></div>
+    <div class="chk"><input type="checkbox" id="txfancy"><label>Fancy header (paints callsign in the waterfall)</label></div>
+    <div class="chk"><input type="checkbox" id="txenc"><label>Encrypt (AES-GCM, base64) with a passphrase</label></div>
+    <div id="txkeywrap" class="hide"><label>Passphrase</label><input type="text" id="txkey" placeholder="shared passphrase"></div>
+    <div class="btns">
+      <button id="txbtn" class="go">Transmit</button>
+      <button id="txdl" class="ghost">Download .wav</button>
+      <span class="status" id="txstatus"></span>
+    </div>
+  </section>
+
+  <!-- HIDE IN AUDIO -->
+  <section id="hide" class="card hide">
+    <h2>Hide in audio</h2>
+    <p class="hint">Rattlegram is a <b>loud, fragile</b> signal: inside its 1600&nbsp;Hz band it must be the stronger sound, so you can't bury it <i>under</i> louder music and still decode it. What you <i>can</i> do is make the two <b>coexist</b> — place the data where the music is quiet, or notch a hole for it.</p>
+    <label>Cover audio (music / ambience)</label>
+    <input type="file" id="hifile" accept="audio/*" style="font-family:var(--sans);padding:8px">
+    <div class="btns">
+      <button id="hianalyze" class="go" disabled>Analyze spectrum</button>
+      <span class="status" id="histatus"></span>
+    </div>
+    <canvas id="hicanvas" width="820" height="150"></canvas>
+    <div class="cap" id="hireport">Upload a track to see its spectrum and the best place to drop a rattlegram.</div>
+    <div id="hibuild" class="hide">
+      <label>Message to hide</label>
+      <textarea id="himsg">meet at the usual spot, 8pm</textarea>
+      <div class="row">
+        <div><label>Carrier (Hz) — auto-picked valley</label><input type="text" id="hicarrier" value="1500"></div>
+        <div><label>Data level vs. music in-band (dB)</label><input type="text" id="higain" value="6"></div>
+      </div>
+      <div class="chk"><input type="checkbox" id="hinotch" checked><label>Notch the music across the data band (cleaner decode)</label></div>
+      <div class="btns">
+        <button id="himix" class="go">Mix &amp; preview</button>
+        <button id="hiplay" class="ghost" disabled>▶ Play mix</button>
+        <button id="hidl" class="ghost" disabled>Download mix .wav</button>
+        <button id="hiverify" class="ghost" disabled>Self-decode (verify)</button>
+      </div>
+      <div class="status" id="hiverifyout"></div>
+    </div>
+  </section>
+
+  <!-- ABOUT -->
+  <section id="about" class="card hide">
+    <h2>What this is, and what it isn't</h2>
+    <table class="lim">
+      <tr><td>Capacity</td><td>Up to 170 bytes per ~1&nbsp;second burst. Emoji cost 4 bytes each.</td></tr>
+      <tr><td>Band</td><td>1600&nbsp;Hz wide, centred on the carrier. Default 1500&nbsp;Hz → occupies <b>700–2300&nbsp;Hz</b>. Tunable 1000–3000&nbsp;Hz, or up to ~20&nbsp;kHz (near-ultrasonic) at 48&nbsp;kHz.</td></tr>
+      <tr><td>Sensitivity</td><td>Measured on this engine (AWGN, 2500&nbsp;Hz ref): ≥90% decode at about <b>+3&nbsp;dB</b> SNR for ≤85&nbsp;B, <b>+5&nbsp;dB</b> for ≤128&nbsp;B, <b>+7&nbsp;dB</b> for ≤170&nbsp;B. It needs a <i>positive</i> SNR — roughly "if you could just talk over the link, it gets through."</td></tr>
+      <tr><td>Privacy</td><td>The payload scrambler uses a <b>fixed public seed</b>. A plain rattlegram is readable by anyone with the app. Hiding it in music is <b>obscurity, not secrecy</b>. For real confidentiality, use the Encrypt option (AES-GCM) so eavesdroppers get only ciphertext.</td></tr>
+      <tr><td>Range</td><td>Set entirely by what carries the sound: a few metres speaker-to-mic; 1–10&nbsp;km on handheld radios; 100s–1000s&nbsp;km on ham HF. The modem doesn't change this.</td></tr>
+    </table>
+    <div class="warnbox" style="margin-top:12px">
+      <b>Law.</b> On amateur radio bands, transmitting messages "encoded for the purpose of obscuring their meaning" is prohibited in many countries (e.g. US FCC Part 97 §97.113) — so the Encrypt option is for your own local/line-level/unlicensed audio between devices, not for ham transmissions. Many licence-free services (PMR446, FRS, CB) are voice-only or restrict data — check your local rules. These are open broadcasts; never send anything you need to keep private without your own encryption, and even then mind the law.
+    </div>
+  </section>
+</div>
+
+<script src="rattlegram.js"></script>
+<script>
+let M=null, enc=null, dec=null, decFetch=null;
+const RATE=48000, BW=1600;
+const $=s=>document.querySelector(s);
+const tab=id=>{document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.tab===id));
+  ['rx','tx','hide','about'].forEach(t=>$('#'+t).classList.toggle('hide',t!==id));};
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>tab(b.dataset.tab));
+
+createRattlegram().then(mod=>{
+  M=mod;
+  enc=M.cwrap('rg_encode','number',['string','number','string','number','number','number','number','number','number']);
+  $('#load').classList.add('hide'); $('#rx').classList.remove('hide');
+  bind();
+});
+
+// ---- helpers ----
+function i16ptr(n){ const p=M._malloc(n*2); return {p,free:()=>M._free(p)}; }
+function readI16(p,n){ return M.HEAP16.subarray(p>>1, (p>>1)+n).slice(); }
+function encodeMsg(bytes, call, carrier, vox, fancy){
+  // bytes: Uint8Array payload (<=170, no interior NUL). returns Float32 at RATE.
+  const cap = RATE*6;
+  const out = i16ptr(cap);
+  const mp = M._malloc(bytes.length+1);
+  M.HEAPU8.set(bytes, mp); M.HEAPU8[mp+bytes.length]=0;
+  const n = M.ccall('rg_encode','number',
+     ['number','number','string','number','number','number','number','number','number'],
+     [mp, bytes.length, call||'N0CALL', carrier|0, vox?6:0, fancy?1:0, RATE, out.p, cap]);
+  M._free(mp);
+  let f=null;
+  if(n>0){ const s=readI16(out.p,n); f=new Float32Array(n); for(let i=0;i<n;i++) f[i]=s[i]/32768; }
+  out.free();
+  return f;
+}
+function toText(u8){ try{return new TextDecoder().decode(u8).replace(/\0+$/,'');}catch(e){return '';} }
+
+// ---- crypto (AES-GCM, passphrase) ----
+async function deriveKey(pass, salt){
+  const base=await crypto.subtle.importKey('raw',new TextEncoder().encode(pass),'PBKDF2',false,['deriveKey']);
+  return crypto.subtle.deriveKey({name:'PBKDF2',salt,iterations:120000,hash:'SHA-256'},base,
+    {name:'AES-GCM',length:256},false,['encrypt','decrypt']);
+}
+async function encryptMsg(text, pass){
+  const salt=crypto.getRandomValues(new Uint8Array(8));
+  const iv=crypto.getRandomValues(new Uint8Array(12));
+  const key=await deriveKey(pass,salt);
+  const ct=new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv},key,new TextEncoder().encode(text)));
+  const blob=new Uint8Array(salt.length+iv.length+ct.length);
+  blob.set(salt);blob.set(iv,salt.length);blob.set(ct,salt.length+iv.length);
+  return 'E:'+btoa(String.fromCharCode(...blob));   // prefix marks encrypted; base64 avoids NUL bytes
+}
+async function decryptMsg(payloadText, pass){
+  if(!payloadText.startsWith('E:')) return null;
+  const blob=Uint8Array.from(atob(payloadText.slice(2)),c=>c.charCodeAt(0));
+  const salt=blob.slice(0,8), iv=blob.slice(8,20), ct=blob.slice(20);
+  const key=await deriveKey(pass,salt);
+  const pt=await crypto.subtle.decrypt({name:'AES-GCM',iv},key,ct);
+  return new TextDecoder().decode(pt);
+}
+
+// ---- WAV ----
+function wavBlob(f32,rate){
+  const n=f32.length, buf=new ArrayBuffer(44+n*2), v=new DataView(buf);
+  const w=(o,s)=>{for(let i=0;i<s.length;i++)v.setUint8(o+i,s.charCodeAt(i))};
+  w(0,'RIFF');v.setUint32(4,36+n*2,true);w(8,'WAVE');w(12,'fmt ');v.setUint32(16,16,true);
+  v.setUint16(20,1,true);v.setUint16(22,1,true);v.setUint32(24,rate,true);v.setUint32(28,rate*2,true);
+  v.setUint16(32,2,true);v.setUint16(34,16,true);w(36,'data');v.setUint32(40,n*2,true);
+  for(let i=0;i<n;i++){let s=Math.max(-1,Math.min(1,f32[i]));v.setInt16(44+i*2,s*32767,true);}
+  return new Blob([buf],{type:'audio/wav'});
+}
+function playF32(f32,rate){
+  const ac=new (window.AudioContext||window.webkitAudioContext)({sampleRate:rate});
+  const b=ac.createBuffer(1,f32.length,rate); b.copyToChannel(f32,0);
+  const s=ac.createBufferSource(); s.buffer=b; s.connect(ac.destination); s.start();
+  s.onended=()=>ac.close();
+}
+
+// ---- decode a whole Float32 buffer (offline), returns [{call,mode,flips,cfo,text}] ----
+function decodeBuffer(f32){
+  const d=M.ccall('rg_dec_create','number',['number'],[RATE]);
+  const results=[];
+  const CH=RATE/50;
+  const sp=M._malloc(CH*2);
+  const pay=M._malloc(170), call=M._malloc(10), modeP=M._malloc(4), flipP=M._malloc(4), cfoP=M._malloc(4);
+  const tail=new Float32Array(f32.length+RATE*2); tail.set(f32);
+  for(let off=0; off+CH<=tail.length; off+=CH){
+    for(let i=0;i<CH;i++){let s=Math.max(-1,Math.min(1,tail[off+i]));M.HEAP16[(sp>>1)+i]=s*32767;}
+    const r=M.ccall('rg_dec_push','number',['number','number','number'],[d,sp,CH]);
+    if(r===1||r===2){
+      const len=M.ccall('rg_dec_fetch','number',['number','number','number','number','number','number'],[d,pay,call,modeP,flipP,cfoP]);
+      const txt = r===2 ? '(ping)' : toText(M.HEAPU8.subarray(pay,pay+Math.max(len,0)));
+      results.push({call:M.UTF8ToString(call), mode:M.HEAP32[modeP>>2], flips:M.HEAP32[flipP>>2],
+                    cfo:M.HEAPF32[cfoP>>2], text:txt, ping:r===2});
+    }
+  }
+  [sp,pay,call,modeP,flipP,cfoP].forEach(p=>M._free(p));
+  M.ccall('rg_dec_destroy','number',['number'],[d]);
+  return results;
+}
+
+// ================= RECEIVE (live mic) =================
+let rxCtx=null, rxStream=null, rxNode=null, rxDec=0, rxBufP=0, rxOn=false;
+async function startRx(){
+  try{
+    rxStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
+  }catch(e){ $('#rxstatus').textContent='Mic denied: '+e.message; return; }
+  rxCtx=new (window.AudioContext||window.webkitAudioContext)({sampleRate:RATE});
+  const src=rxCtx.createMediaStreamSource(rxStream);
+  rxDec=M.ccall('rg_dec_create','number',['number'],[rxCtx.sampleRate]);
+  const CH=(rxCtx.sampleRate/50)|0;
+  rxBufP=M._malloc(16384*2);
+  rxNode=rxCtx.createScriptProcessor(4096,1,1);
+  const pay=M._malloc(170),call=M._malloc(10),modeP=M._malloc(4),flipP=M._malloc(4),cfoP=M._malloc(4);
+  let acc=[];
+  rxNode.onaudioprocess=e=>{
+    const inp=e.inputBuffer.getChannelData(0);
+    let peak=0; for(let i=0;i<inp.length;i++){acc.push(inp[i]); if(Math.abs(inp[i])>peak)peak=Math.abs(inp[i]);}
+    $('#rxlevel').style.width=Math.min(100,peak*140)+'%';
+    while(acc.length>=CH){
+      const chunk=acc.splice(0,CH);
+      for(let i=0;i<CH;i++)M.HEAP16[(rxBufP>>1)+i]=Math.max(-1,Math.min(1,chunk[i]))*32767;
+      const r=M.ccall('rg_dec_push','number',['number','number','number'],[rxDec,rxBufP,CH]);
+      if(r===1||r===2){
+        const len=M.ccall('rg_dec_fetch','number',['number','number','number','number','number','number'],[rxDec,pay,call,modeP,flipP,cfoP]);
+        const txt=r===2?'(ping)':toText(M.HEAPU8.subarray(pay,pay+Math.max(len,0)));
+        showRx({call:M.UTF8ToString(call),mode:M.HEAP32[modeP>>2],flips:M.HEAP32[flipP>>2],cfo:M.HEAPF32[cfoP>>2],text:txt,ping:r===2});
+      } else if(r===-1){ $('#rxstatus').textContent='…heard a signal but it did not decode (too weak / clipped)'; }
+    }
+  };
+  src.connect(rxNode); rxNode.connect(rxCtx.destination);
+  rxOn=true; $('#rxbtn').textContent='Stop'; $('#rxbtn').classList.add('rec');
+  $('#rxstate').textContent='listening'; $('#rxstate').className='pill ok'; $('#rxstatus').textContent='mic live @ '+rxCtx.sampleRate+' Hz';
+}
+function stopRx(){
+  rxOn=false; if(rxNode)rxNode.disconnect(); if(rxStream)rxStream.getTracks().forEach(t=>t.stop());
+  if(rxCtx)rxCtx.close(); if(rxDec)M.ccall('rg_dec_destroy','number',['number'],[rxDec]);
+  $('#rxbtn').textContent='Listen'; $('#rxbtn').classList.remove('rec');
+  $('#rxstate').textContent='idle'; $('#rxstate').className='pill'; $('#rxlevel').style.width=0;
+}
+async function showRx(r){
+  let body=r.text, cls='msg', tag='';
+  if(!r.ping && r.text.startsWith('E:')){
+    const pass=$('#rxkey').value;
+    if(pass){ try{ body=await decryptMsg(r.text,pass); cls='msg enc'; tag='<span class="pill ok">decrypted</span>'; }
+      catch(e){ body='[encrypted — wrong passphrase]'; cls='msg fail'; } }
+    else { body='[encrypted — enter passphrase above]'; cls='msg enc'; }
+  }
+  const el=document.createElement('div'); el.className=cls;
+  el.innerHTML='<div class="meta">'+new Date().toLocaleTimeString()+' · '+(r.call||'?')+
+    ' · mode '+r.mode+' · '+r.flips+' bits corrected · CFO '+r.cfo.toFixed(0)+' Hz '+tag+'</div>'+
+    '<div>'+(body||'').replace(/</g,'&lt;')+'</div>';
+  $('#rxlog').prepend(el);
+}
+
+// ================= SEND =================
+function txRefresh(){
+  const txt=$('#txmsg').value;
+  const bytes=new TextEncoder().encode(txt).length;
+  $('#txbytes').textContent=bytes;
+  const mode=bytes===0?'—':bytes<=85?'16 (strong FEC)':bytes<=128?'15':bytes<=170?'14 (weak FEC)':'TOO BIG';
+  $('#txmode').textContent=mode;
+  $('#txbytes').style.color=bytes>170?'var(--bad)':'var(--ink)';
+}
+async function buildPayload(forEnc){
+  let text=$('#txmsg').value;
+  if(forEnc){ const pass=$('#txkey').value; if(!pass){throw new Error('enter a passphrase');} text=await encryptMsg(text,pass); }
+  const u8=new TextEncoder().encode(text);
+  if(u8.length>170) throw new Error('payload '+u8.length+' B > 170'+(forEnc?' (encryption overhead — shorten the message)':''));
+  return u8;
+}
+async function txMake(){
+  const u8=await buildPayload($('#txenc').checked);
+  return encodeMsg(u8,$('#txcall').value.toUpperCase(),parseInt($('#txcarrier').value)||1500,$('#txvox').checked,$('#txfancy').checked);
+}
+
+// ================= HIDE IN AUDIO =================
+let hiCover=null, hiMix=null;
+function fft(re,im){ // in-place iterative radix-2, n power of 2
+  const n=re.length;
+  for(let i=1,j=0;i<n;i++){let bit=n>>1;for(;j&bit;bit>>=1)j^=bit;j^=bit;if(i<j){[re[i],re[j]]=[re[j],re[i]];[im[i],im[j]]=[im[j],im[i]];}}
+  for(let len=2;len<=n;len<<=1){const ang=-2*Math.PI/len,wr=Math.cos(ang),wi=Math.sin(ang);
+    for(let i=0;i<n;i+=len){let cr=1,ci=0;for(let k=0;k<len/2;k++){
+      const ur=re[i+k],ui=im[i+k],vr=re[i+k+len/2]*cr-im[i+k+len/2]*ci,vi=re[i+k+len/2]*ci+im[i+k+len/2]*cr;
+      re[i+k]=ur+vr;im[i+k]=ui+vi;re[i+k+len/2]=ur-vr;im[i+k+len/2]=ui-vi;
+      const ncr=cr*wr-ci*wi;ci=cr*wi+ci*wr;cr=ncr;}}}
+}
+function avgSpectrum(f32,rate,N){ // Welch average magnitude in dB, length N/2
+  const mag=new Float32Array(N/2); let frames=0;
+  for(let off=0;off+N<=f32.length;off+=N/2){
+    const re=new Float32Array(N),im=new Float32Array(N);
+    for(let i=0;i<N;i++){const w=0.5-0.5*Math.cos(2*Math.PI*i/(N-1));re[i]=f32[off+i]*w;}
+    fft(re,im);
+    for(let i=0;i<N/2;i++)mag[i]+=Math.sqrt(re[i]*re[i]+im[i]*im[i]);
+    frames++;
+  }
+  for(let i=0;i<N/2;i++)mag[i]=mag[i]/Math.max(frames,1);
+  return mag; // linear magnitude per bin
+}
+function bandEnergy(mag,rate,N,flo,fhi){
+  const b0=Math.max(1,Math.floor(flo*N/rate)), b1=Math.min(mag.length-1,Math.ceil(fhi*N/rate));
+  let e=0; for(let i=b0;i<=b1;i++)e+=mag[i]*mag[i]; return e/Math.max(1,b1-b0+1);
+}
+function bestCarrier(mag,rate,N){
+  let best=1500,bestE=Infinity;
+  for(let fc=1050;fc<=3000;fc+=25){
+    const e=bandEnergy(mag,rate,N,fc-BW/2,fc+BW/2);
+    if(e<bestE){bestE=e;best=fc;}
+  }
+  return best;
+}
+function drawSpectrum(mag,rate,N,fc){
+  const c=$('#hicanvas'),ctx=c.getContext('2d'),W=c.width,H=c.height;
+  ctx.clearRect(0,0,W,H);
+  const fmax=4000, bmax=Math.floor(fmax*N/rate);
+  let mx=1e-9; for(let i=1;i<bmax;i++)mx=Math.max(mx,mag[i]);
+  // rattlegram band shade
+  const x0=((fc-BW/2)/fmax)*W, x1=((fc+BW/2)/fmax)*W;
+  ctx.fillStyle='rgba(76,201,240,.22)'; ctx.fillRect(x0,0,x1-x0,H);
+  ctx.strokeStyle='#4cc9f0'; ctx.beginPath();
+  for(let i=1;i<bmax;i++){const x=(i/bmax)*W, y=H-(20*Math.log10(mag[i]/mx)+60)/60*H;
+    if(i===1)ctx.moveTo(x,Math.max(0,y));else ctx.lineTo(x,Math.max(0,Math.min(H,y)));}
+  ctx.strokeStyle='#9fb0c0';ctx.stroke();
+  ctx.fillStyle='#4cc9f0';ctx.font='11px monospace';
+  ctx.fillText('rattlegram band '+(fc-BW/2|0)+'–'+(fc+BW/2|0)+' Hz',x0+4,14);
+  ctx.fillStyle='#9fb0c0';
+  [1000,2000,3000,4000].forEach(f=>{const x=(f/fmax)*W;ctx.fillText(f/1000+'k',x-6,H-3);});
+}
+async function hiAnalyze(file){
+  const ac=new (window.AudioContext||window.webkitAudioContext)({sampleRate:RATE});
+  const buf=await ac.decodeAudioData(await file.arrayBuffer());
+  const ch=buf.getChannelData(0);
+  hiCover=new Float32Array(ch.length); hiCover.set(ch);
+  const N=4096, mag=avgSpectrum(hiCover,RATE,N);
+  const fc=bestCarrier(mag,RATE,N);
+  const inBand=bandEnergy(mag,RATE,N,fc-BW/2,fc+BW/2);
+  const full=bandEnergy(mag,RATE,N,300,3800);
+  const rel=10*Math.log10(inBand/Math.max(full,1e-12));
+  drawSpectrum(mag,RATE,N,fc);
+  $('#hicarrier').value=fc;
+  $('#hireport').innerHTML='Quietest 1600&nbsp;Hz slot is around <b>'+fc+' Hz</b>. The music there sits '+
+    '<b>'+rel.toFixed(1)+' dB</b> relative to its 300–3800 Hz average — '+
+    (rel<-6?'a genuine valley, data can ride with little notching.':'not a deep valley, so notch the band for a clean decode.');
+  $('#hibuild').classList.remove('hide');
+  ac.close();
+}
+function notchBand(f32,rate,fc){ // STFT brick-wall zero across [fc-900,fc+900], overlap-add
+  const N=4096, hop=N/2, out=new Float32Array(f32.length);
+  const win=new Float32Array(N); for(let i=0;i<N;i++)win[i]=0.5-0.5*Math.cos(2*Math.PI*i/(N-1));
+  const b0=Math.floor((fc-900)*N/rate), b1=Math.ceil((fc+900)*N/rate);
+  for(let off=0;off+N<=f32.length;off+=hop){
+    const re=new Float32Array(N),im=new Float32Array(N);
+    for(let i=0;i<N;i++)re[i]=f32[off+i]*win[i];
+    fft(re,im);
+    for(let i=b0;i<=b1;i++){re[i]=0;im[i]=0;re[N-i]=0;im[N-i]=0;}
+    // inverse via conjugate trick
+    for(let i=0;i<N;i++)im[i]=-im[i];
+    fft(re,im);
+    for(let i=0;i<N;i++)out[off+i]+=re[i]/N*win[i];
+  }
+  return out;
+}
+function rms(f32){let s=0;for(let i=0;i<f32.length;i++)s+=f32[i]*f32[i];return Math.sqrt(s/f32.length);}
+async function hiMixBuild(){
+  const fc=parseInt($('#hicarrier').value)||1500;
+  const gainDb=parseFloat($('#higain').value)||6;
+  const u8=new TextEncoder().encode($('#himsg').value);
+  if(u8.length>170){$('#hiverifyout').textContent='message too long ('+u8.length+' B)';return;}
+  const data=encodeMsg(u8,'N0CALL',fc,0,false);
+  let cover=$('#hinotch').checked?notchBand(hiCover,RATE,fc):hiCover.slice();
+  // scale data to sit gainDb above the music's in-band residual
+  const coverRms=Math.max(rms(cover),1e-5), dataRms=Math.max(rms(data),1e-5);
+  const target=coverRms*Math.pow(10,gainDb/20);
+  const g=target/dataRms;
+  // place data starting ~0.5s in; loop cover to cover the data span
+  const start=(RATE*0.5)|0, total=Math.max(cover.length,start+data.length+RATE);
+  const mix=new Float32Array(total);
+  for(let i=0;i<total;i++)mix[i]=cover.length?cover[i%cover.length]*0.9:0;
+  for(let i=0;i<data.length;i++)mix[start+i]+=data[i]*g;
+  let peak=0;for(let i=0;i<total;i++)peak=Math.max(peak,Math.abs(mix[i]));
+  if(peak>1)for(let i=0;i<total;i++)mix[i]/=peak;
+  hiMix=mix;
+  $('#hiplay').disabled=false;$('#hidl').disabled=false;$('#hiverify').disabled=false;
+  $('#hiverifyout').textContent='Mixed '+(data.length/RATE).toFixed(1)+'s of data into '+(total/RATE).toFixed(1)+'s of audio at '+fc+' Hz.';
+}
+
+// ---- bind ----
+function bind(){
+  $('#rxbtn').onclick=()=>rxOn?stopRx():startRx();
+  $('#txmsg').oninput=txRefresh; txRefresh();
+  $('#txenc').onchange=e=>$('#txkeywrap').classList.toggle('hide',!e.target.checked);
+  $('#txbtn').onclick=async()=>{try{$('#txstatus').textContent='encoding…';const f=await txMake();playF32(f,RATE);
+     $('#txstatus').textContent='transmitting '+(f.length/RATE).toFixed(1)+'s — point speaker at the receiver';}catch(e){$('#txstatus').textContent=e.message;}};
+  $('#txdl').onclick=async()=>{try{const f=await txMake();const u=URL.createObjectURL(wavBlob(f,RATE));
+     const a=document.createElement('a');a.href=u;a.download='rattlegram.wav';a.click();$('#txstatus').textContent='saved rattlegram.wav';}catch(e){$('#txstatus').textContent=e.message;}};
+  $('#hifile').onchange=e=>{$('#hianalyze').disabled=!e.target.files.length;};
+  $('#hianalyze').onclick=async()=>{try{$('#histatus').textContent='analyzing…';await hiAnalyze($('#hifile').files[0]);$('#histatus').textContent='';}catch(e){$('#histatus').textContent=e.message;}};
+  $('#himix').onclick=async()=>{try{await hiMixBuild();}catch(e){$('#hiverifyout').textContent=e.message;}};
+  $('#hiplay').onclick=()=>playF32(hiMix,RATE);
+  $('#hidl').onclick=()=>{const u=URL.createObjectURL(wavBlob(hiMix,RATE));const a=document.createElement('a');a.href=u;a.download='rattlegram-in-music.wav';a.click();};
+  $('#hiverify').onclick=()=>{const r=decodeBuffer(hiMix);$('#hiverifyout').innerHTML=r.length?
+     '<span class="pill ok">decoded</span> ['+r[0].call+'] "'+(r[0].text||'').replace(/</g,'&lt;')+'" · '+r[0].flips+' bits corrected':
+     '<span class="pill bad">no decode</span> — raise the data level or enable notch';};
+}
+</script>
+</body>
+</html>

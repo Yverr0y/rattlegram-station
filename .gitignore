@@ -1,0 +1,4 @@
+*.o
+rattlegram-cli
+web/*.wav
+*.wav
