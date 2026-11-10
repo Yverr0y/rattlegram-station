@@ -236,6 +236,34 @@ function wavBlob(f32,rate){
   for(let i=0;i<n;i++){let s=Math.max(-1,Math.min(1,f32[i]));v.setInt16(44+i*2,s*32767,true);}
   return new Blob([buf],{type:'audio/wav'});
 }
+// store-only ZIP of one file (downloads capability allows .zip, not .wav)
+function crc32(u8){let c=~0;for(let i=0;i<u8.length;i++){c^=u8[i];for(let k=0;k<8;k++)c=(c>>>1)^(0xEDB88320&-(c&1));}return ~c>>>0;}
+function zipSingle(name,data){
+  const nm=new TextEncoder().encode(name), crc=crc32(data), sz=data.length, nl=nm.length;
+  const loc=new Uint8Array(30+nl), dv=new DataView(loc.buffer);
+  dv.setUint32(0,0x04034b50,true);dv.setUint16(4,20,true);dv.setUint32(14,crc,true);
+  dv.setUint32(18,sz,true);dv.setUint32(22,sz,true);dv.setUint16(26,nl,true);loc.set(nm,30);
+  const cen=new Uint8Array(46+nl), cv=new DataView(cen.buffer);
+  cv.setUint32(0,0x02014b50,true);cv.setUint16(4,20,true);cv.setUint16(6,20,true);cv.setUint32(16,crc,true);
+  cv.setUint32(20,sz,true);cv.setUint32(24,sz,true);cv.setUint16(28,nl,true);cen.set(nm,46);
+  const locLen=loc.length+sz, eocd=new Uint8Array(22), ev=new DataView(eocd.buffer);
+  ev.setUint32(0,0x06054b50,true);ev.setUint16(8,1,true);ev.setUint16(10,1,true);
+  ev.setUint32(12,cen.length,true);ev.setUint32(16,locLen,true);
+  const out=new Uint8Array(locLen+cen.length+22);
+  out.set(loc,0);out.set(data,loc.length);out.set(cen,locLen);out.set(eocd,locLen+cen.length);
+  return out;
+}
+async function offerAudio(f32,base){
+  const blob=wavBlob(f32,RATE);
+  let dl=null; try{ dl=(window.claude&&claude.use)?await claude.use('downloads'):null; }catch(e){ dl=null; }
+  if(dl){ // hosted sandbox: .wav not allowed, deliver a .zip containing it
+    const wav=new Uint8Array(await blob.arrayBuffer());
+    try{ await dl.save({filename:base+'.zip',data:new Blob([zipSingle(base+'.wav',wav)])}); return 'saved '+base+'.zip'; }
+    catch(e){ return 'download '+(e&&e.code?e.code:e.message); }
+  }
+  const u=URL.createObjectURL(blob),a=document.createElement('a'); a.href=u;a.download=base+'.wav';a.click();
+  return 'saved '+base+'.wav';
+}
 function playF32(f32,rate){
   const ac=new (window.AudioContext||window.webkitAudioContext)({sampleRate:rate});
   const b=ac.createBuffer(1,f32.length,rate); b.copyToChannel(f32,0);
@@ -458,13 +486,12 @@ function bind(){
   $('#txenc').onchange=e=>$('#txkeywrap').classList.toggle('hide',!e.target.checked);
   $('#txbtn').onclick=async()=>{try{$('#txstatus').textContent='encoding…';const f=await txMake();playF32(f,RATE);
      $('#txstatus').textContent='transmitting '+(f.length/RATE).toFixed(1)+'s — point speaker at the receiver';}catch(e){$('#txstatus').textContent=e.message;}};
-  $('#txdl').onclick=async()=>{try{const f=await txMake();const u=URL.createObjectURL(wavBlob(f,RATE));
-     const a=document.createElement('a');a.href=u;a.download='rattlegram.wav';a.click();$('#txstatus').textContent='saved rattlegram.wav';}catch(e){$('#txstatus').textContent=e.message;}};
+  $('#txdl').onclick=async()=>{try{const f=await txMake();$('#txstatus').textContent=await offerAudio(f,'rattlegram');}catch(e){$('#txstatus').textContent=e.message;}};
   $('#hifile').onchange=e=>{$('#hianalyze').disabled=!e.target.files.length;};
   $('#hianalyze').onclick=async()=>{try{$('#histatus').textContent='analyzing…';await hiAnalyze($('#hifile').files[0]);$('#histatus').textContent='';}catch(e){$('#histatus').textContent=e.message;}};
   $('#himix').onclick=async()=>{try{await hiMixBuild();}catch(e){$('#hiverifyout').textContent=e.message;}};
   $('#hiplay').onclick=()=>playF32(hiMix,RATE);
-  $('#hidl').onclick=()=>{const u=URL.createObjectURL(wavBlob(hiMix,RATE));const a=document.createElement('a');a.href=u;a.download='rattlegram-in-music.wav';a.click();};
+  $('#hidl').onclick=async()=>{$('#hiverifyout').textContent=await offerAudio(hiMix,'rattlegram-in-music');};
   $('#hiverify').onclick=()=>{const r=decodeBuffer(hiMix);$('#hiverifyout').innerHTML=r.length?
      '<span class="pill ok">decoded</span> ['+r[0].call+'] "'+(r[0].text||'').replace(/</g,'&lt;')+'" · '+r[0].flips+' bits corrected':
      '<span class="pill bad">no decode</span> — raise the data level or enable notch';};
