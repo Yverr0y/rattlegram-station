@@ -1,0 +1,19 @@
+services:
+  gram:
+    image: nginx:alpine
+    container_name: gram-jeffemmett
+    restart: unless-stopped
+    volumes:
+      - ./web:/usr/share/nginx/html:ro
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.gram.rule=Host(`gram.jeffemmett.com`)"
+      - "traefik.http.routers.gram.entrypoints=web"
+      - "traefik.http.services.gram.loadbalancer.server.port=80"
+    networks:
+      - traefik-public
+    mem_limit: 64m
+
+networks:
+  traefik-public:
+    external: true
