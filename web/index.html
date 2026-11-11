@@ -65,6 +65,9 @@ code{background:var(--panel2);padding:1px 5px;border-radius:4px;font-size:12px}
 a{color:var(--accent)}
 .warnbox{border:1px solid var(--warn);background:rgba(210,153,34,.08);border-radius:8px;padding:10px 12px;font-size:13px;color:var(--ink)}
 .hide{display:none}
+canvas.wf{height:240px;background:#0b0f14;cursor:crosshair}
+label.filelink{display:inline;margin:0;text-transform:none;letter-spacing:0;font-size:12px;color:var(--accent);cursor:pointer;text-decoration:underline}
+.msg.hot{outline:1px solid var(--accent)}
 </style>
 </head>
 <body>
@@ -93,6 +96,8 @@ a{color:var(--accent)}
       <span class="status" id="rxstatus"></span>
     </div>
     <div class="meter"><i id="rxlevel"></i></div>
+    <canvas id="rxwf" class="wf" role="img" aria-label="Live spectrogram of the microphone, 0 to 4 kHz; each decoded message is boxed and labelled where it was heard"></canvas>
+    <div class="cap">Spectrogram 0–4&nbsp;kHz, newest on the right. A rattlegram is the 1.6&nbsp;kHz-tall block; once it decodes it gets a box and its message, where it was heard. <label for="rxfile" class="filelink">Or decode a recording…</label><input type="file" id="rxfile" accept="audio/*" class="hide"></div>
     <label>Decrypt with passphrase (leave blank for plain messages)</label>
     <input type="text" id="rxkey" placeholder="shared passphrase">
     <div class="log" id="rxlog"></div>
@@ -294,57 +299,187 @@ function decodeBuffer(f32){
   return results;
 }
 
-// ================= RECEIVE (live mic) =================
-let rxCtx=null, rxStream=null, rxNode=null, rxDec=0, rxBufP=0, rxOn=false;
-async function startRx(){
-  try{
-    rxStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
-  }catch(e){ $('#rxstatus').textContent='Mic denied: '+e.message; return; }
-  rxCtx=new (window.AudioContext||window.webkitAudioContext)({sampleRate:RATE});
-  const src=rxCtx.createMediaStreamSource(rxStream);
-  rxDec=M.ccall('rg_dec_create','number',['number'],[rxCtx.sampleRate]);
-  const CH=(rxCtx.sampleRate/50)|0;
-  rxBufP=M._malloc(16384*2);
-  rxNode=rxCtx.createScriptProcessor(4096,1,1);
-  const pay=M._malloc(170),call=M._malloc(10),modeP=M._malloc(4),flipP=M._malloc(4),cfoP=M._malloc(4);
-  let acc=[];
-  rxNode.onaudioprocess=e=>{
-    const inp=e.inputBuffer.getChannelData(0);
-    let peak=0; for(let i=0;i<inp.length;i++){acc.push(inp[i]); if(Math.abs(inp[i])>peak)peak=Math.abs(inp[i]);}
-    $('#rxlevel').style.width=Math.min(100,peak*140)+'%';
-    while(acc.length>=CH){
-      const chunk=acc.splice(0,CH);
-      for(let i=0;i<CH;i++)M.HEAP16[(rxBufP>>1)+i]=Math.max(-1,Math.min(1,chunk[i]))*32767;
-      const r=M.ccall('rg_dec_push','number',['number','number','number'],[rxDec,rxBufP,CH]);
-      if(r===1||r===2){
-        const len=M.ccall('rg_dec_fetch','number',['number','number','number','number','number','number'],[rxDec,pay,call,modeP,flipP,cfoP]);
-        const txt=r===2?'(ping)':toText(M.HEAPU8.subarray(pay,pay+Math.max(len,0)));
-        showRx({call:M.UTF8ToString(call),mode:M.HEAP32[modeP>>2],flips:M.HEAP32[flipP>>2],cfo:M.HEAPF32[cfoP>>2],text:txt,ping:r===2});
-      } else if(r===-1){ $('#rxstatus').textContent='…heard a signal but it did not decode (too weak / clipped)'; }
+// ================= RECEIVE (live mic, or a recording) =================
+// One stream of samples feeds BOTH the spectrogram and the decoder, so a decoded burst
+// is placed by sample count, not by guessing at audio latency.
+// MEASURED (vendored engine, every carrier 1000-3000 Hz): the decoder reports a message
+// 0.22 s after the burst ends, every burst lasts 1.26 s, and `cfo` is the carrier itself.
+const BURST_S=1.26, REPORT_LAG_S=0.22;
+const WF={N:2048, hop:512, fmax:4000, floor:-105, ceil:-35};
+const WF_LUT=(()=>{ // dark -> teal -> cyan -> warm -> white
+  const st=[[11,15,20],[18,52,86],[30,120,150],[76,201,240],[245,225,130],[255,255,255]];
+  const lut=new Uint8ClampedArray(256*3);
+  for(let i=0;i<256;i++){const x=i/255*(st.length-1),k=Math.min(st.length-2,x|0),f=x-k;
+    for(let c=0;c<3;c++)lut[i*3+c]=st[k][c]+(st[k+1][c]-st[k][c])*f;}
+  return lut;
+})();
+let wf=null, rx=null, rxCtx=null, rxStream=null, rxNode=null, rxOn=false, rxBusy=false;
+
+function wfInit(rate, secs){
+  const cols=Math.ceil(secs*rate/WF.hop), rows=Math.floor(WF.fmax*WF.N/rate);
+  const off=document.createElement('canvas'); off.width=cols; off.height=rows;
+  const octx=off.getContext('2d'); octx.fillStyle='#0b0f14'; octx.fillRect(0,0,cols,rows);
+  const win=new Float32Array(WF.N); for(let i=0;i<WF.N;i++)win[i]=0.5-0.5*Math.cos(2*Math.PI*i/(WF.N-1));
+  if(wf&&wf.raf)cancelAnimationFrame(wf.raf);
+  wf={rate,cols,rows,off,octx,col:octx.createImageData(1,rows),win,ring:new Float32Array(WF.N),ringPos:0,
+      sinceHop:0,sample:0,marks:[],re:new Float32Array(WF.N),im:new Float32Array(WF.N),raf:0,live:false};
+}
+function wfFeed(x){
+  const w=wf;
+  for(let i=0;i<x.length;i++){
+    w.ring[w.ringPos]=x[i]; w.ringPos=(w.ringPos+1)%WF.N; w.sample++;
+    if(++w.sinceHop===WF.hop){w.sinceHop=0; wfColumn();}
+  }
+}
+function wfColumn(){
+  const w=wf, N=WF.N, re=w.re, im=w.im, d=w.col.data, scale=4/N, span=WF.ceil-WF.floor;
+  for(let i=0;i<N;i++){re[i]=w.ring[(w.ringPos+i)%N]*w.win[i]; im[i]=0;}
+  fft(re,im);
+  for(let r=0;r<w.rows;r++){ // row 0 = top = highest frequency
+    const b=w.rows-r, db=20*Math.log10(Math.hypot(re[b],im[b])*scale+1e-12);
+    const li=Math.max(0,Math.min(255,((db-WF.floor)/span*255)|0))*3, k=r*4;
+    d[k]=WF_LUT[li]; d[k+1]=WF_LUT[li+1]; d[k+2]=WF_LUT[li+2]; d[k+3]=255;
+  }
+  w.octx.drawImage(w.off,-1,0); w.octx.putImageData(w.col,w.cols-1,0);
+}
+function wfDraw(){
+  const w=wf, c=$('#rxwf'); if(!w) return;
+  const dpr=window.devicePixelRatio||1, W=c.clientWidth, H=c.clientHeight;
+  if(c.width!==Math.round(W*dpr)||c.height!==Math.round(H*dpr)){c.width=Math.round(W*dpr); c.height=Math.round(H*dpr);}
+  const ctx=c.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.imageSmoothingEnabled=true; ctx.drawImage(w.off,0,0,W,H);
+  const now=w.sample-WF.N/2, spp=w.cols*WF.hop/W;            // newest column's centre; samples per CSS px
+  const X=s=>W-(now-s)/spp, Y=f=>H-(f/WF.fmax)*H;
+  ctx.font='10px ui-monospace,Menlo,monospace'; ctx.textBaseline='alphabetic';
+  ctx.fillStyle='rgba(159,176,192,.55)';
+  for(const f of [1000,2000,3000]){ctx.fillRect(0,Y(f),W,.5); ctx.fillText(f/1000+'k',3,Y(f)-3);}
+  const secs=w.cols*WF.hop/w.rate;
+  for(let t=2;t<secs;t+=2){const x=X(now-t*w.rate); ctx.fillRect(x,H-5,.5,5); ctx.fillText('-'+t+'s',x+2,H-3);}
+  for(const m of w.marks){
+    const x1=X(m.s1); if(x1<-200) continue;
+    const col=m.kind==='fail'?'#f85149':m.kind==='enc'?'#3fb950':m.kind==='ping'?'#9fb0c0':'#4cc9f0';
+    ctx.strokeStyle=col; ctx.lineWidth=m.hot?3:1.5;
+    if(m.kind==='fail'){ctx.setLineDash([4,3]); ctx.beginPath(); ctx.moveTo(x1,0); ctx.lineTo(x1,H); ctx.stroke(); ctx.setLineDash([]);}
+    else{
+      const x0=X(m.s0), y0=Y(m.f1), y1=Y(m.f0);
+      ctx.fillStyle=m.hot?'rgba(76,201,240,.18)':'rgba(76,201,240,.06)'; ctx.fillRect(x0,y0,x1-x0,y1-y0);
+      ctx.strokeRect(x0,y0,x1-x0,y1-y0);
     }
-  };
-  src.connect(rxNode); rxNode.connect(rxCtx.destination);
-  rxOn=true; $('#rxbtn').textContent='Stop'; $('#rxbtn').classList.add('rec');
-  $('#rxstate').textContent='listening'; $('#rxstate').className='pill ok'; $('#rxstatus').textContent='mic live @ '+rxCtx.sampleRate+' Hz';
+    // label tag, Merlin-style: sits on the box, clamped into view
+    ctx.font='600 12px system-ui,-apple-system,sans-serif';
+    let txt=m.label; const maxW=Math.min(320,W-8);
+    while(txt.length>1&&ctx.measureText(txt).width>maxW-12)txt=txt.slice(0,-2)+'…';
+    const tw=ctx.measureText(txt).width+12, tx=Math.max(4,Math.min(W-tw-4,(m.kind==='fail'?x1:X(m.s0)))), ty=m.kind==='fail'?H-40:Math.max(4,Y(m.f1)-22);
+    ctx.fillStyle=col; ctx.beginPath(); ctx.roundRect?ctx.roundRect(tx,ty,tw,18,9):ctx.rect(tx,ty,tw,18); ctx.fill();
+    ctx.fillStyle='#04202b'; ctx.fillText(txt,tx+6,ty+13);
+  }
+  if(w.live) w.raf=requestAnimationFrame(wfDraw);
+}
+function wfMark(m){
+  wf.marks.push(m);
+  const oldest=wf.sample-wf.cols*WF.hop-BURST_S*wf.rate*2;
+  wf.marks=wf.marks.filter(k=>k.s1>oldest);
+  if(!wf.live) wfDraw();
+}
+
+function rxSession(rate, secs){
+  const dec=M.ccall('rg_dec_create','number',['number'],[rate]);
+  if(!dec) throw new Error('the decoder does not support '+rate+' Hz audio (8k/16k/32k/44.1k/48k)');
+  wfInit(rate, secs);
+  const CH=(rate/50)|0;
+  return {dec,rate,CH,bufP:M._malloc(CH*2),pend:new Float32Array(CH),pendN:0,sample:0,
+    pay:M._malloc(170),call:M._malloc(10),modeP:M._malloc(4),flipP:M._malloc(4),cfoP:M._malloc(4)};
+}
+function rxFree(s){
+  if(!s) return;
+  M.ccall('rg_dec_destroy','number',['number'],[s.dec]);
+  [s.bufP,s.pay,s.call,s.modeP,s.flipP,s.cfoP].forEach(p=>M._free(p));
+}
+function rxFeed(s, x){
+  wfFeed(x);
+  for(let i=0;i<x.length;i++){
+    s.pend[s.pendN++]=x[i];
+    if(s.pendN<s.CH) continue;
+    s.pendN=0; s.sample+=s.CH;
+    const h=s.bufP>>1, H16=M.HEAP16;
+    for(let k=0;k<s.CH;k++)H16[h+k]=Math.max(-1,Math.min(1,s.pend[k]))*32767;
+    const r=M.ccall('rg_dec_push','number',['number','number','number'],[s.dec,s.bufP,s.CH]);
+    if(r===1||r===2){
+      const len=M.ccall('rg_dec_fetch','number',['number','number','number','number','number','number'],[s.dec,s.pay,s.call,s.modeP,s.flipP,s.cfoP]);
+      const res={call:M.UTF8ToString(s.call),mode:M.HEAP32[s.modeP>>2],flips:M.HEAP32[s.flipP>>2],cfo:M.HEAPF32[s.cfoP>>2],
+        text:r===2?'(ping)':toText(M.HEAPU8.subarray(s.pay,s.pay+Math.max(len,0))),ping:r===2};
+      const s1=s.sample-REPORT_LAG_S*s.rate;
+      const m={s0:s1-BURST_S*s.rate,s1,f0:res.cfo-BW/2,f1:res.cfo+BW/2,kind:res.ping?'ping':'msg',label:(res.call||'?')+' · '+res.text,hot:false};
+      wfMark(m); showRx(res,m);
+    } else if(r===-1){
+      wfMark({s0:s.sample,s1:s.sample,kind:'fail',label:'heard a burst, no decode',hot:false});
+      $('#rxstatus').textContent='…heard a signal but it did not decode (too weak / clipped)';
+    }
+  }
+}
+
+async function startRx(){
+  if(rxBusy) return; rxBusy=true;
+  try{
+    try{ rxStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}}); }
+    catch(e){ $('#rxstatus').textContent='Mic denied: '+e.message; return; }
+    rxCtx=new (window.AudioContext||window.webkitAudioContext)({sampleRate:RATE});
+    try{ rx=rxSession(rxCtx.sampleRate, 8); }
+    catch(e){ $('#rxstatus').textContent=e.message; rxStream.getTracks().forEach(t=>t.stop()); rxCtx.close(); return; }
+    const src=rxCtx.createMediaStreamSource(rxStream);
+    rxNode=rxCtx.createScriptProcessor(2048,1,1);
+    rxNode.onaudioprocess=e=>{
+      const inp=e.inputBuffer.getChannelData(0);
+      let peak=0; for(let i=0;i<inp.length;i++){const a=Math.abs(inp[i]); if(a>peak)peak=a;}
+      $('#rxlevel').style.width=Math.min(100,peak*140)+'%';
+      if(rx) rxFeed(rx, inp);
+    };
+    src.connect(rxNode); rxNode.connect(rxCtx.destination);
+    rxOn=true; wf.live=true; wfDraw();
+    $('#rxbtn').textContent='Stop'; $('#rxbtn').classList.add('rec');
+    $('#rxstate').textContent='listening'; $('#rxstate').className='pill ok'; $('#rxstatus').textContent='mic live @ '+rxCtx.sampleRate+' Hz';
+  } finally { rxBusy=false; }
 }
 function stopRx(){
-  rxOn=false; if(rxNode)rxNode.disconnect(); if(rxStream)rxStream.getTracks().forEach(t=>t.stop());
-  if(rxCtx)rxCtx.close(); if(rxDec)M.ccall('rg_dec_destroy','number',['number'],[rxDec]);
+  rxOn=false; if(rxNode){rxNode.onaudioprocess=null; rxNode.disconnect(); rxNode=null;}
+  if(rxStream)rxStream.getTracks().forEach(t=>t.stop()); rxStream=null;
+  if(rxCtx)rxCtx.close(); rxCtx=null;
+  rxFree(rx); rx=null;
+  if(wf){wf.live=false; if(wf.raf)cancelAnimationFrame(wf.raf); wfDraw();}  // keep the last picture on screen
   $('#rxbtn').textContent='Listen'; $('#rxbtn').classList.remove('rec');
   $('#rxstate').textContent='idle'; $('#rxstate').className='pill'; $('#rxlevel').style.width=0;
 }
-async function showRx(r){
+// A recording goes through the same path, all at once; the spectrogram spans the file (up to 60 s).
+async function rxDecodeFile(file){
+  if(rxOn) stopRx();
+  $('#rxstatus').textContent='decoding '+file.name+'…';
+  const ac=new (window.AudioContext||window.webkitAudioContext)({sampleRate:RATE});
+  let buf; try{ buf=await ac.decodeAudioData(await file.arrayBuffer()); } finally { ac.close(); }
+  const n=buf.length, mono=new Float32Array(n);
+  for(let c=0;c<buf.numberOfChannels;c++){const d=buf.getChannelData(c); for(let i=0;i<n;i++)mono[i]+=d[i]/buf.numberOfChannels;}
+  const s=rxSession(RATE, Math.min(60, n/RATE+1));
+  const before=$('#rxlog').children.length;
+  try{ rxFeed(s, mono); rxFeed(s, new Float32Array(RATE)); } finally { rxFree(s); }
+  wfDraw();
+  const got=$('#rxlog').children.length-before;
+  $('#rxstatus').textContent=file.name+': '+(got?got+' burst'+(got>1?'s':'')+' decoded':'nothing decoded')+(n/RATE>60?' (spectrogram shows the last 60 s)':'');
+}
+async function showRx(r, mark){
   let body=r.text, cls='msg', tag='';
-  if(!r.ping && r.text.startsWith('E:')){
+  if(!r.ping && /^E:[A-Za-z0-9+/]{48,}=*$/.test(r.text)){
     const pass=$('#rxkey').value;
-    if(pass){ try{ body=await decryptMsg(r.text,pass); cls='msg enc'; tag='<span class="pill ok">decrypted</span>'; }
-      catch(e){ body='[encrypted — wrong passphrase]'; cls='msg fail'; } }
-    else { body='[encrypted — enter passphrase above]'; cls='msg enc'; }
+    mark.kind='enc';
+    if(pass){ try{ body=await decryptMsg(r.text,pass); cls='msg enc'; tag='<span class="pill ok">decrypted</span>'; mark.label=(r.call||'?')+' · 🔓 '+body; }
+      catch(e){ body='[encrypted — wrong passphrase]'; cls='msg fail'; mark.label=(r.call||'?')+' · 🔒 wrong passphrase'; } }
+    else { body='[encrypted — enter passphrase above]'; cls='msg enc'; mark.label=(r.call||'?')+' · 🔒 encrypted'; }
+    if(wf&&!wf.live) wfDraw();
   }
   const el=document.createElement('div'); el.className=cls;
-  el.innerHTML='<div class="meta">'+new Date().toLocaleTimeString()+' · '+(r.call||'?')+
-    ' · mode '+r.mode+' · '+r.flips+' bits corrected · CFO '+r.cfo.toFixed(0)+' Hz '+tag+'</div>'+
-    '<div>'+(body||'').replace(/</g,'&lt;')+'</div>';
+  el.innerHTML='<div class="meta">'+new Date().toLocaleTimeString()+' · '+(r.call||'?').replace(/</g,'&lt;')+
+    ' · mode '+r.mode+' · '+r.flips+' bits corrected · carrier '+r.cfo.toFixed(0)+' Hz '+tag+'</div>'+
+    '<div>'+(body||'').replace(/&/g,'&amp;').replace(/</g,'&lt;')+'</div>';
+  const hot=on=>{mark.hot=on; el.classList.toggle('hot',on); if(wf&&!wf.live) wfDraw();};
+  el.onmouseenter=()=>hot(true); el.onmouseleave=()=>hot(false);
   $('#rxlog').prepend(el);
 }
 
@@ -482,6 +617,7 @@ async function hiMixBuild(){
 // ---- bind ----
 function bind(){
   $('#rxbtn').onclick=()=>rxOn?stopRx():startRx();
+  $('#rxfile').onchange=async e=>{const f=e.target.files[0]; e.target.value=''; if(f) try{await rxDecodeFile(f);}catch(err){$('#rxstatus').textContent=err.message;}};
   $('#txmsg').oninput=txRefresh; txRefresh();
   $('#txenc').onchange=e=>$('#txkeywrap').classList.toggle('hide',!e.target.checked);
   $('#txbtn').onclick=async()=>{try{$('#txstatus').textContent='encoding…';const f=await txMake();playF32(f,RATE);
