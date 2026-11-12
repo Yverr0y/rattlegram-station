@@ -97,7 +97,7 @@ label.filelink{display:inline;margin:0;text-transform:none;letter-spacing:0;font
     </div>
     <div class="meter"><i id="rxlevel"></i></div>
     <canvas id="rxwf" class="wf" role="img" aria-label="Live spectrogram of the microphone, 0 to 4 kHz; each decoded message is boxed and labelled where it was heard"></canvas>
-    <div class="cap">Spectrogram 0–4&nbsp;kHz, newest on the right. A rattlegram is the 1.6&nbsp;kHz-tall block; once it decodes it gets a box and its message, where it was heard. <label for="rxfile" class="filelink">Or decode a recording…</label><input type="file" id="rxfile" accept="audio/*" class="hide"></div>
+    <div class="cap">Spectrogram 0–4&nbsp;kHz, newest on the right. A rattlegram is the 1.6&nbsp;kHz-tall block: an amber “detecting…” box marks it the moment it is heard, and once it decodes it gets its message, where it was heard. <label for="rxfile" class="filelink">Or decode a recording…</label><input type="file" id="rxfile" accept="audio/*" class="hide"></div>
     <label>Decrypt with passphrase (leave blank for plain messages)</label>
     <input type="text" id="rxkey" placeholder="shared passphrase">
     <div class="log" id="rxlog"></div>
@@ -304,7 +304,7 @@ function decodeBuffer(f32){
 // is placed by sample count, not by guessing at audio latency.
 // MEASURED (vendored engine, every carrier 1000-3000 Hz): the decoder reports a message
 // 0.22 s after the burst ends, every burst lasts 1.26 s, and `cfo` is the carrier itself.
-const BURST_S=1.26, REPORT_LAG_S=0.22;
+const BURST_S=1.26, REPORT_LAG_S=0.22, SYNC_GIVEUP_S=3;
 const WF={N:2048, hop:512, fmax:4000, floor:-105, ceil:-35};
 const WF_LUT=(()=>{ // dark -> teal -> cyan -> warm -> white
   const st=[[11,15,20],[18,52,86],[30,120,150],[76,201,240],[245,225,130],[255,255,255]];
@@ -357,13 +357,14 @@ function wfDraw(){
   for(let t=2;t<secs;t+=2){const x=X(now-t*w.rate); ctx.fillRect(x,H-5,.5,5); ctx.fillText('-'+t+'s',x+2,H-3);}
   for(const m of w.marks){
     const x1=X(m.s1); if(x1<-200) continue;
-    const col=m.kind==='fail'?'#f85149':m.kind==='enc'?'#3fb950':m.kind==='ping'?'#9fb0c0':'#4cc9f0';
+    const col=m.kind==='fail'?'#f85149':m.kind==='enc'?'#3fb950':m.kind==='ping'?'#9fb0c0':m.kind==='sync'?'#d29922':'#4cc9f0';
     ctx.strokeStyle=col; ctx.lineWidth=m.hot?3:1.5;
     if(m.kind==='fail'){ctx.setLineDash([4,3]); ctx.beginPath(); ctx.moveTo(x1,0); ctx.lineTo(x1,H); ctx.stroke(); ctx.setLineDash([]);}
     else{
       const x0=X(m.s0), y0=Y(m.f1), y1=Y(m.f0);
-      ctx.fillStyle=m.hot?'rgba(76,201,240,.18)':'rgba(76,201,240,.06)'; ctx.fillRect(x0,y0,x1-x0,y1-y0);
-      ctx.strokeRect(x0,y0,x1-x0,y1-y0);
+      ctx.fillStyle=m.kind==='sync'?'rgba(210,153,34,.08)':m.hot?'rgba(76,201,240,.18)':'rgba(76,201,240,.06)'; ctx.fillRect(x0,y0,x1-x0,y1-y0);
+      if(m.kind==='sync')ctx.setLineDash([5,3]);
+      ctx.strokeRect(x0,y0,x1-x0,y1-y0); ctx.setLineDash([]);
     }
     // label tag, Merlin-style: sits on the box, clamped into view
     ctx.font='600 12px system-ui,-apple-system,sans-serif';
@@ -404,7 +405,17 @@ function rxFeed(s, x){
     const h=s.bufP>>1, H16=M.HEAP16;
     for(let k=0;k<s.CH;k++)H16[h+k]=Math.max(-1,Math.min(1,s.pend[k]))*32767;
     const r=M.ccall('rg_dec_push','number',['number','number','number'],[s.dec,s.bufP,s.CH]);
-    if(r===1||r===2){
+    if(s.syncMark){                       // a burst is arriving: grow its box until it decodes or fails
+      s.syncMark.s1=s.sample;
+      if(r!==0||s.sample-s.syncMark.s0>SYNC_GIVEUP_S*s.rate){wf.marks=wf.marks.filter(k=>k!==s.syncMark); s.syncMark=null;}
+    }
+    if(r===3){
+      M.ccall('rg_dec_fetch','number',['number','number','number','number','number','number'],[s.dec,s.pay,s.call,s.modeP,s.flipP,s.cfoP]);
+      const cfo=M.HEAPF32[s.cfoP>>2];
+      s.syncMark={s0:s.sample,s1:s.sample,f0:cfo-BW/2,f1:cfo+BW/2,kind:'sync',label:'detecting…',hot:false};
+      wfMark(s.syncMark);
+      $('#rxstatus').textContent='…burst detected near '+Math.round(cfo)+' Hz, decoding';
+    } else if(r===1||r===2){
       const len=M.ccall('rg_dec_fetch','number',['number','number','number','number','number','number'],[s.dec,s.pay,s.call,s.modeP,s.flipP,s.cfoP]);
       const res={call:M.UTF8ToString(s.call),mode:M.HEAP32[s.modeP>>2],flips:M.HEAP32[s.flipP>>2],cfo:M.HEAPF32[s.cfoP>>2],
         text:r===2?'(ping)':toText(M.HEAPU8.subarray(s.pay,s.pay+Math.max(len,0))),ping:r===2};

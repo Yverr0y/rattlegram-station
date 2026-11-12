@@ -67,7 +67,9 @@ API void *rg_dec_create(int rate) {
 API void rg_dec_destroy(void *h) { if (!h) return; Dec *s=(Dec*)h; delete s->d; delete s; }
 
 // push PCM int16 samples; drives the state machine in rate/50 chunks.
-// returns: 0 nothing, 1 message decoded, 2 ping, -1 preamble/CRC fail seen.
+// returns: 0 nothing, 1 message decoded, 2 ping, -1 preamble/CRC fail seen,
+//          3 preamble synced (a burst is arriving; its carrier is rg_dec_fetch's cfo).
+//          1, 2 and -1 outrank 3 within one push.
 API int rg_dec_push(void *h, const int16_t *s, int count) {
     if (!h) return 0;
     Dec *d = (Dec*)h;
@@ -78,6 +80,7 @@ API int rg_dec_push(void *h, const int16_t *s, int count) {
         int st = d->d->process();
         if (st == STATUS_SYNC || st == STATUS_PING || st == STATUS_NOPE)
             d->d->staged(&cfo, &mode, call);
+        if (st == STATUS_SYNC) { d->cfo = cfo; if (outcome == 0) outcome = 3; }
         if (st == STATUS_FAIL) outcome = -1;
         else if (st == STATUS_PING) {
             d->d->staged(&cfo, &mode, call);
