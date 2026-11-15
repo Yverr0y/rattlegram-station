@@ -94,10 +94,15 @@ label.filelink{display:inline;margin:0;text-transform:none;letter-spacing:0;font
     <div class="btns">
       <button id="rxbtn" class="go">Listen</button>
       <span class="status" id="rxstatus"></span>
+      <select id="rxview" style="width:auto;margin-left:auto" aria-label="Spectrogram range">
+        <option value="split" selected>0–4 kHz + ultrasonic 15–20 kHz</option>
+        <option value="voice">0–4 kHz</option>
+        <option value="full">0–24 kHz (everything)</option>
+      </select>
     </div>
     <div class="meter"><i id="rxlevel"></i></div>
-    <canvas id="rxwf" class="wf" role="img" aria-label="Live spectrogram of the microphone, 0 to 4 kHz; each decoded message is boxed and labelled where it was heard"></canvas>
-    <div class="cap">Spectrogram 0–4&nbsp;kHz, newest on the right. A rattlegram is the 1.6&nbsp;kHz-tall block: an amber “detecting…” box marks it the moment it is heard, and once it decodes its message is written inside the box. Senders with “visible letters” on also draw the message itself in the audio, so you can read it straight off the waterfall. <label for="rxfile" class="filelink">Or decode a recording…</label><input type="file" id="rxfile" accept="audio/*" class="hide"></div>
+    <canvas id="rxwf" class="wf" role="img" aria-label="Live spectrogram of the microphone; each decoded message is boxed and labelled where it was heard"></canvas>
+    <div class="cap">Spectrogram, newest on the right. By default the bottom shows 0–4&nbsp;kHz and the top strip 15–20&nbsp;kHz, where ultrasonic “hidden” rattlegrams ride (pick another range top right). A rattlegram is the 1.6&nbsp;kHz-tall block: an amber “detecting…” box marks it the moment it is heard, and once it decodes its message is written inside the box. Senders with “visible letters” on also draw the message itself in the audio, so you can read it straight off the waterfall. <label for="rxfile" class="filelink">Or decode a recording…</label><input type="file" id="rxfile" accept="audio/*" class="hide"></div>
     <label>Decrypt with passphrase (leave blank for plain messages)</label>
     <input type="text" id="rxkey" placeholder="shared passphrase">
     <div class="log" id="rxlog"></div>
@@ -441,14 +446,53 @@ const WF_LUT=(()=>{ // dark -> teal -> cyan -> warm -> white
 })();
 let wf=null, rx=null, rxCtx=null, rxStream=null, rxNode=null, rxOn=false, rxBusy=false;
 
+// Views: frequency segments stacked bottom-up, each taking `frac` of the height.
+const WF_VIEWS={
+  voice:{segs:[[0,4000,1]], grid:[1000,2000,3000]},
+  split:{segs:[[0,4000,0.72],[15000,20000,0.28]], grid:[1000,2000,3000,16000,18000]},
+  full:{segs:[[0,24000,1]], grid:[4000,8000,12000,16000,20000]}};
+let wfView='split';
+// frequency -> height fraction from the bottom (0..1); outside every segment: clamp to the nearest edge
+function wfFrac(f){
+  const v=WF_VIEWS[wfView]; let cum=0, best=null;
+  for(const [a,b,fr] of v.segs){
+    if(f>=a&&f<=b) return cum+(f-a)/(b-a)*fr;
+    if(f>b) best=cum+fr;                 // above this segment: its top edge, unless a higher one holds it
+    cum+=fr;
+  }
+  return best===null?0:best;
+}
+function wfVisible(f){ return WF_VIEWS[wfView].segs.some(([a,b])=>f>=a&&f<=b); }
+// per display row (0 = top): the FFT bin range it covers; a row shows the loudest bin in it
+function wfRowMap(rows, rate){
+  const v=WF_VIEWS[wfView], map=new Int32Array(rows*2); let cum=0, r=rows;
+  for(const [a,b,fr] of v.segs){
+    const n=Math.round(fr*rows), lo=r-n;
+    for(let k=0;k<n;k++){
+      const fLo=a+(b-a)*k/n, fHi=a+(b-a)*(k+1)/n, row=r-1-k;
+      const b0=Math.max(1,Math.floor(fLo*WF.N/rate)), b1=Math.min(WF.N/2-1,Math.max(b0,Math.floor(fHi*WF.N/rate)));
+      map[row*2]=b0; map[row*2+1]=b1;
+    }
+    r=lo; cum+=fr;
+  }
+  for(;r>0;r--){map[(r-1)*2]=1;map[(r-1)*2+1]=1;}
+  return map;
+}
+function wfSetView(v){
+  wfView=v;
+  if(!wf) return;
+  wf.map=wfRowMap(wf.rows, wf.rate);
+  wf.octx.fillStyle='#0b0f14'; wf.octx.fillRect(0,0,wf.cols,wf.rows);   // old columns used the old scale
+  wfDraw();
+}
 function wfInit(rate, secs){
-  const cols=Math.ceil(secs*rate/WF.hop), rows=Math.floor(WF.fmax*WF.N/rate);
+  const cols=Math.ceil(secs*rate/WF.hop), rows=240;
   const off=document.createElement('canvas'); off.width=cols; off.height=rows;
   const octx=off.getContext('2d'); octx.fillStyle='#0b0f14'; octx.fillRect(0,0,cols,rows);
   const win=new Float32Array(WF.N); for(let i=0;i<WF.N;i++)win[i]=0.5-0.5*Math.cos(2*Math.PI*i/(WF.N-1));
   if(wf&&wf.raf)cancelAnimationFrame(wf.raf);
   wf={rate,cols,rows,off,octx,col:octx.createImageData(1,rows),win,ring:new Float32Array(WF.N),ringPos:0,
-      sinceHop:0,sample:0,marks:[],re:new Float32Array(WF.N),im:new Float32Array(WF.N),raf:0,live:false};
+      sinceHop:0,sample:0,marks:[],map:wfRowMap(rows,rate),re:new Float32Array(WF.N),im:new Float32Array(WF.N),raf:0,live:false};
 }
 function wfFeed(x){
   const w=wf;
@@ -462,7 +506,8 @@ function wfColumn(){
   for(let i=0;i<N;i++){re[i]=w.ring[(w.ringPos+i)%N]*w.win[i]; im[i]=0;}
   fft(re,im);
   for(let r=0;r<w.rows;r++){ // row 0 = top = highest frequency
-    const b=w.rows-r, db=20*Math.log10(Math.hypot(re[b],im[b])*scale+1e-12);
+    let m=0; for(let b=w.map[r*2];b<=w.map[r*2+1];b++){const a=re[b]*re[b]+im[b]*im[b]; if(a>m)m=a;}
+    const db=20*Math.log10(Math.sqrt(m)*scale+1e-12);
     const li=Math.max(0,Math.min(255,((db-WF.floor)/span*255)|0))*3, k=r*4;
     d[k]=WF_LUT[li]; d[k+1]=WF_LUT[li+1]; d[k+2]=WF_LUT[li+2]; d[k+3]=255;
   }
@@ -475,10 +520,13 @@ function wfDraw(){
   const ctx=c.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0);
   ctx.imageSmoothingEnabled=true; ctx.drawImage(w.off,0,0,W,H);
   const now=w.sample-WF.N/2, spp=w.cols*WF.hop/W;            // newest column's centre; samples per CSS px
-  const X=s=>W-(now-s)/spp, Y=f=>H-(f/WF.fmax)*H;
+  const X=s=>W-(now-s)/spp, Y=f=>H-wfFrac(f)*H;
   ctx.font='10px ui-monospace,Menlo,monospace'; ctx.textBaseline='alphabetic';
   ctx.fillStyle='rgba(159,176,192,.55)';
-  for(const f of [1000,2000,3000]){ctx.fillRect(0,Y(f),W,.5); ctx.fillText(f/1000+'k',3,Y(f)-3);}
+  for(const f of WF_VIEWS[wfView].grid){ctx.fillRect(0,Y(f),W,.5); ctx.fillText(f/1000+'k',3,Y(f)-3);}
+  { let cum=0; const sg=WF_VIEWS[wfView].segs;                 // seam between stacked ranges
+    for(let i=0;i<sg.length-1;i++){cum+=sg[i][2]; const y=H-cum*H; ctx.fillStyle='rgba(245,225,130,.7)'; ctx.fillRect(0,y-1,W,2);
+      ctx.fillText('↑ '+sg[i+1][0]/1000+'–'+sg[i+1][1]/1000+' kHz',W-92,y-4); ctx.fillStyle='rgba(159,176,192,.55)';} }
   const secs=w.cols*WF.hop/w.rate;
   for(let t=2;t<secs;t+=2){const x=X(now-t*w.rate); ctx.fillRect(x,H-5,.5,5); ctx.fillText('-'+t+'s',x+2,H-3);}
   for(const m of w.marks){
@@ -487,11 +535,12 @@ function wfDraw(){
     ctx.strokeStyle=col; ctx.lineWidth=m.hot?3:1.5;
     if(m.kind==='fail'){ctx.setLineDash([4,3]); ctx.beginPath(); ctx.moveTo(x1,0); ctx.lineTo(x1,H); ctx.stroke(); ctx.setLineDash([]);}
     else{
-      const x0=X(m.s0), y0=Y(m.f1), y1=Y(m.f0);
+      const x0=X(m.s0), y0=Y(m.f1), y1=Math.max(Y(m.f0),y0+6);   // out of view: a thin strip at the edge
       ctx.fillStyle=m.kind==='sync'?'rgba(210,153,34,.08)':m.hot?'rgba(76,201,240,.18)':'rgba(76,201,240,.06)'; ctx.fillRect(x0,y0,x1-x0,y1-y0);
       if(m.kind==='sync')ctx.setLineDash([5,3]);
       ctx.strokeRect(x0,y0,x1-x0,y1-y0); ctx.setLineDash([]);
-      if(m.text) drawBoxText(ctx, m.text, x0, y0, x1-x0, y1-y0);
+      if(m.text){ if(y1-y0>=48) drawBoxText(ctx, m.text, x0, y0, x1-x0, y1-y0);
+        else drawBoxText(ctx, m.text, x1+4, Math.max(24,y0-6), Math.min(280,W-x1-8), Math.max(y1-y0+12,30)); }  // short box: text beside it, burst stays visible
     }
     // label tag, Merlin-style: sits on the box, clamped into view
     ctx.font='600 12px system-ui,-apple-system,sans-serif';
@@ -561,7 +610,7 @@ function rxFeed(s, x){
   rxDecFeed(s, s.hid, s.filt.push(x));
 }
 // Shown in the spectrogram's 0-4 kHz view: a burst above it is drawn as a strip on the top edge.
-function markBand(cfo){ return cfo+BW/2<=WF.fmax ? [cfo-BW/2,cfo+BW/2] : [WF.fmax-260,WF.fmax]; }
+function markBand(cfo){ return [cfo-BW/2,cfo+BW/2]; }
 function rxDecFeed(s, d, x){
   for(let i=0;i<x.length;i++){
     d.pend[d.pendN++]=x[i];
@@ -590,7 +639,7 @@ function rxDecFeed(s, d, x){
       s.seen.push({key,s1}); s.seen=s.seen.filter(e=>s1-e.s1<10*s.rate);
       if(d.hidden) wf.marks=wf.marks.filter(k=>!(k.kind==='fail'&&Math.abs(k.s1-s1)<SYNC_GIVEUP_S*s.rate));
       const [f0,f1]=markBand(res.cfo);
-      const m={s0:s1-BURST_S*s.rate,s1,f0,f1,kind:res.ping?'ping':'msg',label:(res.call||'?')+(res.cfo>WF.fmax?' · '+(res.cfo/1000).toFixed(1)+' kHz ↑':''),text:res.text,hot:false};
+      const m={s0:s1-BURST_S*s.rate,s1,f0,f1,kind:res.ping?'ping':'msg',label:(res.call||'?')+(res.cfo>4000?' · '+(res.cfo/1000).toFixed(1)+' kHz':''),text:res.text,hot:false};
       wfMark(m); showRx(res,m);
     } else if(r===-1&&!d.hidden){
       wfMark({s0:d.sample,s1:d.sample,kind:'fail',label:'heard a burst, no decode',hot:false});
@@ -727,7 +776,7 @@ function bestCarrier(mag,rate,N){
 function drawSpectrum(mag,rate,N,fc){
   const c=$('#hicanvas'),ctx=c.getContext('2d'),W=c.width,H=c.height;
   ctx.clearRect(0,0,W,H);
-  const fmax=4000, bmax=Math.floor(fmax*N/rate);
+  const fmax=fc+BW/2>4000?20000:4000, bmax=Math.floor(fmax*N/rate);
   let mx=1e-9; for(let i=1;i<bmax;i++)mx=Math.max(mx,mag[i]);
   // rattlegram band shade
   const x0=Math.min(W-14,((fc-BW/2)/fmax)*W), x1=Math.max(x0+14,Math.min(W,((fc+BW/2)/fmax)*W));
@@ -740,7 +789,7 @@ function drawSpectrum(mag,rate,N,fc){
   const lbl='rattlegram band '+(fc-BW/2|0)+'–'+(fc+BW/2|0)+' Hz'+(fc+BW/2>fmax?' → (off this chart)':'');
   ctx.fillText(lbl,Math.min(x0+4,W-ctx.measureText(lbl).width-18),14);
   ctx.fillStyle='#9fb0c0';
-  [1000,2000,3000,4000].forEach(f=>{const x=(f/fmax)*W;ctx.fillText(f/1000+'k',x-6,H-3);});
+  (fmax>4000?[2000,5000,10000,15000,20000]:[1000,2000,3000,4000]).forEach(f=>{const x=(f/fmax)*W;ctx.fillText(f/1000+'k',x-6,H-3);});
 }
 async function hiAnalyze(file){
   const ac=new (window.AudioContext||window.webkitAudioContext)({sampleRate:RATE});
@@ -860,6 +909,7 @@ async function hiMixBuild(){
 
 // ---- bind ----
 function bind(){
+  $('#rxview').onchange=e=>wfSetView(e.target.value);
   $('#rxbtn').onclick=()=>rxOn?stopRx():startRx();
   $('#rxfile').onchange=async e=>{const f=e.target.files[0]; e.target.value=''; if(f) try{await rxDecodeFile(f);}catch(err){$('#rxstatus').textContent=err.message;}};
   $('#txmsg').oninput=txRefresh; txRefresh();
