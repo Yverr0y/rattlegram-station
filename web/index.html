@@ -117,6 +117,13 @@ label.filelink{display:inline;margin:0;text-transform:none;letter-spacing:0;font
     <div class="chk"><input type="checkbox" id="txvox"><label>Leading noise for VOX radios (opens squelch before data)</label></div>
     <div class="chk"><input type="checkbox" id="txfancy"><label>Fancy header (paints callsign in the waterfall)</label></div>
     <div class="chk"><input type="checkbox" id="txvis" checked><label>Write the message as visible letters after the burst (readable in any spectrogram; first 20 characters; never for encrypted messages)</label></div>
+    <div class="row" id="txvoicewrap">
+      <div><label>Letter voice</label><select id="txvoice">
+        <option value="chime" selected>Chime — each letter one soft harmonic chord</option>
+        <option value="melody">Melody — each letter its own note (playful, less legible)</option>
+        <option value="classic">Classic tones (sharp, clashing)</option>
+      </select></div>
+    </div>
     <div class="chk"><input type="checkbox" id="txenc"><label>Encrypt (AES-GCM, base64) with a passphrase</label></div>
     <div id="txkeywrap" class="hide"><label>Passphrase</label><input type="text" id="txkey" placeholder="shared passphrase"></div>
     <div class="btns">
@@ -129,7 +136,7 @@ label.filelink{display:inline;margin:0;text-transform:none;letter-spacing:0;font
   <!-- HIDE IN AUDIO -->
   <section id="hide" class="card hide">
     <h2>Hide in audio</h2>
-    <p class="hint">Rattlegram is a <b>loud, fragile</b> signal: inside its 1600&nbsp;Hz band it must be the stronger sound, so you can't bury it <i>under</i> louder music and still decode it. What you <i>can</i> do is make the two <b>coexist</b> — place the data where the music is quiet, or notch a hole for it.</p>
+    <p class="hint">Rattlegram is a <b>loud, fragile</b> signal: inside its 1600&nbsp;Hz band it must be the stronger sound. But the band can be one the music doesn't use — <b>ultrasonic</b>, or just above the music — and then the data can sit 25–35&nbsp;dB <i>under</i> the music and still decode, because receivers also listen through a filter that drops everything below 2.1&nbsp;kHz. Inside the music's own band, place it where the music is quiet, or notch a hole for it.</p>
     <label>Cover audio</label>
     <div class="btns">
       <button id="higentle" class="go">♪ Use gentle music</button>
@@ -147,9 +154,18 @@ label.filelink{display:inline;margin:0;text-transform:none;letter-spacing:0;font
       <label>Message to hide</label>
       <textarea id="himsg">meet at the usual spot, 8pm</textarea>
       <div class="row">
-        <div><label>Carrier (Hz) — auto-picked valley</label><input type="text" id="hicarrier" value="1500"></div>
-        <div><label>Data level vs. music in-band (dB)</label><input type="text" id="higain" value="6"></div>
+        <div><label>Where to hide it</label><select id="hiplace">
+          <option value="ultra">Ultrasonic, 17.5 kHz — inaudible to most adults</option>
+          <option value="above">Above the music, ~3 kHz — a faint hiss</option>
+          <option value="valley">In the music's quietest slot — audible</option>
+        </select></div>
+        <div><label>Carrier (Hz)</label><input type="text" id="hicarrier" value="1500"></div>
       </div>
+      <div class="row">
+        <div><label>Data level vs. the music (dB)</label><input type="text" id="higain" value="6"></div>
+        <div class="cap" id="hiplacenote" style="align-self:end"></div>
+      </div>
+      <div class="chk hide" id="hisingwrap"><input type="checkbox" id="hising"><label>Also <b>sing</b> the message: its letters as overtone chords in key with the music, readable in any spectrogram (this reveals the text to anyone who looks)</label></div>
       <div class="chk"><input type="checkbox" id="hinotch" checked><label>Notch the music across the data band (cleaner decode)</label></div>
       <div class="btns">
         <button id="himix" class="go">Mix &amp; preview</button>
@@ -284,31 +300,62 @@ function glyphCols(ch){
   let c=ch.codePointAt(0); if(c<0x20||c>0x7E) c=0x3F;
   return FONT5.slice((c-0x20)*5,(c-0x20)*5+5);
 }
-// Tones that draw `text` (first VIS.maxChars chars) as letters centred on fc Hz:
-// one sine per pixel row, gated per 45 ms glyph column with short ramps (no clicks).
-function visibleText(text, fc, rate){
+const midiHz=m=>440*Math.pow(2,(m-69)/12);
+const hzMidi=f=>Math.round(69+12*Math.log2(f/440));
+function visChars(text){
   let chars=[...text.replace(/\s+/g,' ').trim()];
   if(chars.length>VIS.maxChars) chars=chars.slice(0,VIS.maxChars-1).concat('…');
-  const cols=[0];
-  for(const ch of chars){ cols.push(...glyphCols(ch),0); }
-  const per=Math.round(VIS.col*rate), n=cols.length*per, out=new Float32Array(n);
-  const slew=1/Math.max(1,VIS.ramp*rate);
+  return chars;
+}
+// Tones that draw `text` as letters in a spectrogram: one sine per pixel row, gated per
+// glyph column with ramps (no clicks). Voices:
+//  classic — rows 90 Hz apart around fc: unrelated pitches, so a letter is a harsh cluster.
+//  chime   — rows are overtones 8..15 of ONE note (rows f0 apart, f0 a real note), so a
+//            letter is a single harmonic timbre, like overtone singing; the note's own
+//            fundamental hums softly underneath for the letter's whole length.
+//  melody  — chime, but each letter gets its own pentatonic note (same text, same tune).
+// opts: {voice, col (s per glyph column), notes: [f0 per char] (overrides the melody)}.
+function visibleText(text, fc, rate, opts={}){
+  const voice=opts.voice||'chime', chars=visChars(text), col=opts.col||VIS.col;
+  const K0=8, base=midiHz(hzMidi(fc/(K0+3.5)));          // fc 1500 -> C3 (131 Hz): rows 1047..1962 Hz
+  const PENTA=[-3,0,2,4]; let deg=1;                       // A C D E: letter size varies at most ±26%
+  const f0s=chars.map((ch,i)=>{
+    if(opts.notes) return opts.notes[i%opts.notes.length];
+    if(voice!=='melody') return base;
+    deg=Math.max(0,Math.min(3,deg+[-1,1,-2,2,0][(ch.codePointAt(0)+i)%5]));
+    return base*Math.pow(2,PENTA[deg]/12);
+  });
+  const per=Math.round(col*rate), cpc=6;                  // 5 glyph columns + 1 space per char
+  const n=(chars.length*cpc+1)*per, out=new Float32Array(n);
+  const ramp=voice==='classic'?VIS.ramp:Math.min(0.025,col/3), slew=1/Math.max(1,ramp*rate);
+  const colBits=i=>{const c=((i/per)|0)-1, k=(c/cpc)|0, j=c%cpc; return c<0||k>=chars.length||j===5?0:glyphCols(chars[k])[j];};
+  const charAt=i=>Math.min(chars.length-1,Math.max(0,((((i/per)|0)-1)/cpc)|0));
   for(let r=0;r<VIS.rows;r++){
-    const f=fc+((VIS.rows-1)/2-r)*VIS.rowHz, w=2*Math.PI*f/rate;
-    let env=0;
+    let env=0, ph=0;
     for(let i=0;i<n;i++){
-      const on=(cols[(i/per)|0]>>r)&1;
+      const on=(colBits(i)>>r)&1;
       env+=on?Math.min(slew,1-env):-Math.min(slew,env);
-      if(env>0) out[i]+=env*Math.sin(w*i);
+      const f=voice==='classic'?fc+((VIS.rows-1)/2-r)*VIS.rowHz:f0s[charAt(i)]*(K0+VIS.rows-1-r);
+      ph+=2*Math.PI*f/rate;
+      if(env>0) out[i]+=env*Math.sin(ph)*(voice==='classic'?1:0.8);
+    }
+  }
+  if(voice!=='classic'){                                   // the hum: fundamental + octave, per letter
+    let ph=0, env=0; const hs=1/(0.04*rate);
+    for(let i=0;i<n;i++){
+      const c=((i/per)|0)-1, on=c>=0&&c<chars.length*cpc-1;
+      env+=on?Math.min(hs,1-env):-Math.min(hs,env);
+      const f=f0s[charAt(i)]; ph+=2*Math.PI*f/rate;
+      if(env>0) out[i]+=env*(0.9*Math.sin(ph)+0.5*Math.sin(2*ph));
     }
   }
   return out;
 }
-// burst + gap + visible text, text peak at 80% of the burst's peak.
-function withVisibleText(burst, text, fc, rate){
-  const vis=visibleText(text, fc, rate);
+// burst + gap + visible text. Classic peaks at 80% of the burst, the sung voices at 45%.
+function withVisibleText(burst, text, fc, rate, voice){
+  const vis=visibleText(text, fc, rate, {voice});
   let pb=0, pv=0; for(const x of burst) pb=Math.max(pb,Math.abs(x)); for(const x of vis) pv=Math.max(pv,Math.abs(x));
-  const k=pv>0?0.8*pb/pv:0, gap=Math.round(VIS.gap*rate), out=new Float32Array(burst.length+gap+vis.length);
+  const k=pv>0?(voice==='classic'?0.8:0.45)*pb/pv:0, gap=Math.round(VIS.gap*rate), out=new Float32Array(burst.length+gap+vis.length);
   out.set(burst,0); for(let i=0;i<vis.length;i++) out[burst.length+gap+i]=vis[i]*k;
   return out;
 }
@@ -320,6 +367,7 @@ function playF32(f32,rate){
 }
 
 // ---- decode a whole Float32 buffer (offline), returns [{call,mode,flips,cfo,text}] ----
+function decodeAny(f32){ const r=decodeBuffer(f32); return r.length?r:decodeBuffer(bandPass(f32,RATE,HID_LO,RATE/2-200)); }
 function decodeBuffer(f32){
   const d=M.ccall('rg_dec_create','number',['number'],[RATE]);
   const results=[];
@@ -341,6 +389,41 @@ function decodeBuffer(f32){
   M.ccall('rg_dec_destroy','number',['number'],[d]);
   return results;
 }
+
+// ---- brick-wall band filter, streaming (STFT overlap-add, 50% Hann: sums to 1) ----
+// The decoder's preamble search weighs the WHOLE band, so loud music anywhere in the
+// spectrum hides a burst sitting in a quiet part of it. MEASURED: with gentle music, a
+// 17.5 kHz or 2.6 kHz burst decodes at -40 dB re the music once the music is cut away,
+// and not at all below about -5 dB without the cut. Latency: N samples.
+function bandFilter(rate, lo, hi){
+  const N=2048, hop=N/2, win=new Float32Array(N);
+  for(let i=0;i<N;i++) win[i]=0.5-0.5*Math.cos(2*Math.PI*i/N);    // periodic Hann: exact COLA at N/2
+  const b0=Math.max(1,Math.floor(lo*N/rate)), b1=Math.min(N/2-1,Math.ceil(hi*N/rate));
+  const inb=new Float32Array(N), ola=new Float32Array(N), re=new Float32Array(N), im=new Float32Array(N);
+  const fifo=new Float32Array(N*2); let fill=hop, fr=0, fw=N;    // fifo pre-loaded with N zeros
+  return {latency:N+hop, push(x){
+    const out=new Float32Array(x.length);
+    for(let i=0;i<x.length;i++){
+      inb[fill++]=x[i];
+      if(fill===N){
+        for(let k=0;k<N;k++){re[k]=inb[k]*win[k]; im[k]=0;}
+        fft(re,im);
+        for(let k=0;k<=N/2;k++) if(k<b0||k>b1){re[k]=im[k]=0; if(k&&k<N/2){re[N-k]=im[N-k]=0;}}
+        for(let k=0;k<N;k++) im[k]=-im[k];
+        fft(re,im);
+        for(let k=0;k<N;k++) ola[k]+=re[k]/N;
+        for(let k=0;k<hop;k++){fifo[fw%fifo.length]=ola[k]; fw++;}
+        ola.copyWithin(0,hop); ola.fill(0,hop); inb.copyWithin(0,hop); fill=hop;
+      }
+      out[i]=fifo[fr%fifo.length]; fr++;
+    }
+    return out;
+  }};
+}
+// the "hidden" receive path passes everything above the music band
+const HID_LO=2100;
+function bandPass(f32, rate, lo, hi){ const f=bandFilter(rate,lo,hi), x=new Float32Array(f32.length+f.latency); x.set(f32);
+  return f.push(x).subarray(f.latency); }
 
 // ================= RECEIVE (live mic, or a recording) =================
 // One stream of samples feeds BOTH the spectrogram and the decoder, so a decoded burst
@@ -451,47 +534,66 @@ function wfMark(m){
   if(!wf.live) wfDraw();
 }
 
-function rxSession(rate, secs){
+// Two decoders hear the same stream: `main` the full band, `hid` only what is above the
+// music band (HID_LO up), so a quiet burst hidden in music still syncs. `hid` stays
+// silent about syncs and failures, and a burst both decode is reported once.
+function rxDecoder(rate, CH, hidden){
   const dec=M.ccall('rg_dec_create','number',['number'],[rate]);
   if(!dec) throw new Error('the decoder does not support '+rate+' Hz audio (8k/16k/32k/44.1k/48k)');
-  wfInit(rate, secs);
-  const CH=(rate/50)|0;
-  return {dec,rate,CH,bufP:M._malloc(CH*2),pend:new Float32Array(CH),pendN:0,sample:0,
+  return {dec,hidden,bufP:M._malloc(CH*2),pend:new Float32Array(CH),pendN:0,sample:0,syncMark:null,
     pay:M._malloc(170),call:M._malloc(10),modeP:M._malloc(4),flipP:M._malloc(4),cfoP:M._malloc(4)};
+}
+function rxSession(rate, secs){
+  wfInit(rate, secs);
+  const CH=(rate/50)|0, s={rate,CH,main:rxDecoder(rate,CH,false),hid:null,filt:bandFilter(rate,HID_LO,rate/2-200),seen:[]};
+  s.hid=rxDecoder(rate,CH,true); s.hid.sample=-s.filt.latency;      // its samples arrive `latency` late
+  return s;
 }
 function rxFree(s){
   if(!s) return;
-  M.ccall('rg_dec_destroy','number',['number'],[s.dec]);
-  [s.bufP,s.pay,s.call,s.modeP,s.flipP,s.cfoP].forEach(p=>M._free(p));
+  for(const d of [s.main,s.hid]){ if(!d) continue;
+    M.ccall('rg_dec_destroy','number',['number'],[d.dec]);
+    [d.bufP,d.pay,d.call,d.modeP,d.flipP,d.cfoP].forEach(p=>M._free(p)); }
 }
 function rxFeed(s, x){
   wfFeed(x);
+  rxDecFeed(s, s.main, x);
+  rxDecFeed(s, s.hid, s.filt.push(x));
+}
+// Shown in the spectrogram's 0-4 kHz view: a burst above it is drawn as a strip on the top edge.
+function markBand(cfo){ return cfo+BW/2<=WF.fmax ? [cfo-BW/2,cfo+BW/2] : [WF.fmax-260,WF.fmax]; }
+function rxDecFeed(s, d, x){
   for(let i=0;i<x.length;i++){
-    s.pend[s.pendN++]=x[i];
-    if(s.pendN<s.CH) continue;
-    s.pendN=0; s.sample+=s.CH;
-    const h=s.bufP>>1, H16=M.HEAP16;
-    for(let k=0;k<s.CH;k++)H16[h+k]=Math.max(-1,Math.min(1,s.pend[k]))*32767;
-    const r=M.ccall('rg_dec_push','number',['number','number','number'],[s.dec,s.bufP,s.CH]);
-    if(s.syncMark){                       // a burst is arriving: grow its box until it decodes or fails
-      s.syncMark.s1=s.sample;
-      if(r!==0||s.sample-s.syncMark.s0>SYNC_GIVEUP_S*s.rate){wf.marks=wf.marks.filter(k=>k!==s.syncMark); s.syncMark=null;}
+    d.pend[d.pendN++]=x[i];
+    if(d.pendN<s.CH) continue;
+    d.pendN=0; d.sample+=s.CH;
+    if(d.sample<=0) continue;                                   // filter warm-up
+    const h=d.bufP>>1, H16=M.HEAP16;
+    for(let k=0;k<s.CH;k++)H16[h+k]=Math.max(-1,Math.min(1,d.pend[k]))*32767;
+    const r=M.ccall('rg_dec_push','number',['number','number','number'],[d.dec,d.bufP,s.CH]);
+    if(d.syncMark){                       // a burst is arriving: grow its box until it decodes or fails
+      d.syncMark.s1=d.sample;
+      if(r!==0||d.sample-d.syncMark.s0>SYNC_GIVEUP_S*s.rate){wf.marks=wf.marks.filter(k=>k!==d.syncMark); d.syncMark=null;}
     }
-    if(r===3){
-      M.ccall('rg_dec_fetch','number',['number','number','number','number','number','number'],[s.dec,s.pay,s.call,s.modeP,s.flipP,s.cfoP]);
-      const cfo=M.HEAPF32[s.cfoP>>2];
-      s.syncMark={s0:s.sample,s1:s.sample,f0:cfo-BW/2,f1:cfo+BW/2,kind:'sync',label:'detecting…',hot:false};
-      wfMark(s.syncMark);
+    if(r===3&&!d.hidden){
+      M.ccall('rg_dec_fetch','number',['number','number','number','number','number','number'],[d.dec,d.pay,d.call,d.modeP,d.flipP,d.cfoP]);
+      const cfo=M.HEAPF32[d.cfoP>>2], [f0,f1]=markBand(cfo);
+      d.syncMark={s0:d.sample,s1:d.sample,f0,f1,kind:'sync',label:'detecting…',hot:false};
+      wfMark(d.syncMark);
       $('#rxstatus').textContent='…burst detected near '+Math.round(cfo)+' Hz, decoding';
     } else if(r===1||r===2){
-      const len=M.ccall('rg_dec_fetch','number',['number','number','number','number','number','number'],[s.dec,s.pay,s.call,s.modeP,s.flipP,s.cfoP]);
-      const res={call:M.UTF8ToString(s.call),mode:M.HEAP32[s.modeP>>2],flips:M.HEAP32[s.flipP>>2],cfo:M.HEAPF32[s.cfoP>>2],
-        text:r===2?'(ping)':toText(M.HEAPU8.subarray(s.pay,s.pay+Math.max(len,0))),ping:r===2};
-      const s1=s.sample-REPORT_LAG_S*s.rate;
-      const m={s0:s1-BURST_S*s.rate,s1,f0:res.cfo-BW/2,f1:res.cfo+BW/2,kind:res.ping?'ping':'msg',label:res.call||'?',text:res.text,hot:false};
+      const len=M.ccall('rg_dec_fetch','number',['number','number','number','number','number','number'],[d.dec,d.pay,d.call,d.modeP,d.flipP,d.cfoP]);
+      const res={call:M.UTF8ToString(d.call),mode:M.HEAP32[d.modeP>>2],flips:M.HEAP32[d.flipP>>2],cfo:M.HEAPF32[d.cfoP>>2],
+        text:r===2?'(ping)':toText(M.HEAPU8.subarray(d.pay,d.pay+Math.max(len,0))),ping:r===2,hidden:d.hidden};
+      const s1=d.sample-REPORT_LAG_S*s.rate, key=res.call+'|'+res.text;
+      if(s.seen.some(e=>e.key===key&&Math.abs(e.s1-s1)<BURST_S*s.rate)) continue;   // the other decoder had it
+      s.seen.push({key,s1}); s.seen=s.seen.filter(e=>s1-e.s1<10*s.rate);
+      if(d.hidden) wf.marks=wf.marks.filter(k=>!(k.kind==='fail'&&Math.abs(k.s1-s1)<SYNC_GIVEUP_S*s.rate));
+      const [f0,f1]=markBand(res.cfo);
+      const m={s0:s1-BURST_S*s.rate,s1,f0,f1,kind:res.ping?'ping':'msg',label:(res.call||'?')+(res.cfo>WF.fmax?' · '+(res.cfo/1000).toFixed(1)+' kHz ↑':''),text:res.text,hot:false};
       wfMark(m); showRx(res,m);
-    } else if(r===-1){
-      wfMark({s0:s.sample,s1:s.sample,kind:'fail',label:'heard a burst, no decode',hot:false});
+    } else if(r===-1&&!d.hidden){
+      wfMark({s0:d.sample,s1:d.sample,kind:'fail',label:'heard a burst, no decode',hot:false});
       $('#rxstatus').textContent='…heard a signal but it did not decode (too weak / clipped)';
     }
   }
@@ -538,7 +640,7 @@ async function rxDecodeFile(file){
   for(let c=0;c<buf.numberOfChannels;c++){const d=buf.getChannelData(c); for(let i=0;i<n;i++)mono[i]+=d[i]/buf.numberOfChannels;}
   const s=rxSession(RATE, Math.min(60, n/RATE+1));
   const before=$('#rxlog').children.length;
-  try{ rxFeed(s, mono); rxFeed(s, new Float32Array(RATE)); } finally { rxFree(s); }
+  try{ rxFeed(s, mono); rxFeed(s, new Float32Array(RATE+s.filt.latency)); } finally { rxFree(s); }
   wfDraw();
   const got=$('#rxlog').children.length-before;
   $('#rxstatus').textContent=file.name+': '+(got?got+' burst'+(got>1?'s':'')+' decoded':'nothing decoded')+(n/RATE>60?' (spectrogram shows the last 60 s)':'');
@@ -555,7 +657,7 @@ async function showRx(r, mark){
   }
   const el=document.createElement('div'); el.className=cls;
   el.innerHTML='<div class="meta">'+new Date().toLocaleTimeString()+' · '+(r.call||'?').replace(/</g,'&lt;')+
-    ' · mode '+r.mode+' · '+r.flips+' bits corrected · carrier '+r.cfo.toFixed(0)+' Hz '+tag+'</div>'+
+    ' · mode '+r.mode+' · '+r.flips+' bits corrected · carrier '+r.cfo.toFixed(0)+' Hz '+(r.hidden?'<span class="pill">hidden band</span> ':'')+tag+'</div>'+
     '<div>'+(body||'').replace(/&/g,'&amp;').replace(/</g,'&lt;')+'</div>';
   const hot=on=>{mark.hot=on; el.classList.toggle('hot',on); if(wf&&!wf.live) wfDraw();};
   el.onmouseenter=()=>hot(true); el.onmouseleave=()=>hot(false);
@@ -584,7 +686,7 @@ async function txMake(){
   const f=encodeMsg(u8,$('#txcall').value.toUpperCase(),fc,$('#txvox').checked,$('#txfancy').checked);
   // Plaintext only: drawing an encrypted message's text into the audio would publish it.
   if(!f || enc || !$('#txvis').checked) return f;
-  return withVisibleText(f, $('#txmsg').value, fc, RATE);
+  return withVisibleText(f, $('#txmsg').value, fc, RATE, $('#txvoice').value);
 }
 
 // ================= HIDE IN AUDIO =================
@@ -628,14 +730,15 @@ function drawSpectrum(mag,rate,N,fc){
   const fmax=4000, bmax=Math.floor(fmax*N/rate);
   let mx=1e-9; for(let i=1;i<bmax;i++)mx=Math.max(mx,mag[i]);
   // rattlegram band shade
-  const x0=((fc-BW/2)/fmax)*W, x1=((fc+BW/2)/fmax)*W;
+  const x0=Math.min(W-14,((fc-BW/2)/fmax)*W), x1=Math.max(x0+14,Math.min(W,((fc+BW/2)/fmax)*W));
   ctx.fillStyle='rgba(76,201,240,.22)'; ctx.fillRect(x0,0,x1-x0,H);
   ctx.strokeStyle='#4cc9f0'; ctx.beginPath();
   for(let i=1;i<bmax;i++){const x=(i/bmax)*W, y=H-(20*Math.log10(mag[i]/mx)+60)/60*H;
     if(i===1)ctx.moveTo(x,Math.max(0,y));else ctx.lineTo(x,Math.max(0,Math.min(H,y)));}
   ctx.strokeStyle='#9fb0c0';ctx.stroke();
   ctx.fillStyle='#4cc9f0';ctx.font='11px monospace';
-  ctx.fillText('rattlegram band '+(fc-BW/2|0)+'–'+(fc+BW/2|0)+' Hz',x0+4,14);
+  const lbl='rattlegram band '+(fc-BW/2|0)+'–'+(fc+BW/2|0)+' Hz'+(fc+BW/2>fmax?' → (off this chart)':'');
+  ctx.fillText(lbl,Math.min(x0+4,W-ctx.measureText(lbl).width-18),14);
   ctx.fillStyle='#9fb0c0';
   [1000,2000,3000,4000].forEach(f=>{const x=(f/fmax)*W;ctx.fillText(f/1000+'k',x-6,H-3);});
 }
@@ -671,14 +774,31 @@ function gentleMusic(){
   for(let i=0;i<n;i++)out[i]*=0.5/pk;
   return out;
 }
+let hiMag=null, hiGentle=false;
+const HI_NOTE={
+  ultra:'Needs a speaker and mic that reach 18 kHz (most phones and laptops do) and lossless audio: MP3/AAC cut it off. Receivers decode it automatically.',
+  above:'Rides above the music, so it can sit far below it. Receivers decode it automatically.',
+  valley:'Shares the band with the music: it must be the louder sound there, or notch the music.'};
+// lowest carrier in [lo,hi] whose band is >=40 dB under the music's body (lower = less shrill);
+// failing that, the quietest one
+function bestCarrierIn(mag,N,lo,hi){ const ref=bandEnergy(mag,RATE,N,300,3800); let best=lo,bestE=Infinity;
+  for(let fc=lo;fc<=hi;fc+=25){const e=bandEnergy(mag,RATE,N,fc-BW/2,fc+BW/2); if(e<ref*1e-4) return fc; if(e<bestE){bestE=e;best=fc;}} return best; }
+function hiPlace(){
+  const pl=$('#hiplace').value, N=4096;
+  const fc=pl==='ultra'?17500:pl==='above'?bestCarrierIn(hiMag,N,HID_LO+BW/2+50,Math.min(6000,RATE/2-BW)):bestCarrier(hiMag,RATE,N);
+  $('#hicarrier').value=fc; $('#hiplacenote').textContent=HI_NOTE[pl];
+  drawSpectrum(hiMag,RATE,N,fc);
+  return fc;
+}
 function hiAnalyzeCover(){
-  const N=4096, mag=avgSpectrum(hiCover,RATE,N);
+  const N=4096, mag=avgSpectrum(hiCover,RATE,N); hiMag=mag;
+  $('#hiplace').value=hiGentle?'ultra':'valley'; $('#higain').value=hiGentle?-25:6; $('#hinotch').checked=!hiGentle;
+  $('#hisingwrap').classList.toggle('hide',!hiGentle); if(!hiGentle) $('#hising').checked=false;
   const fc=bestCarrier(mag,RATE,N);
   const inBand=bandEnergy(mag,RATE,N,fc-BW/2,fc+BW/2);
   const full=bandEnergy(mag,RATE,N,300,3800);
   const rel=10*Math.log10(inBand/Math.max(full,1e-12));
-  drawSpectrum(mag,RATE,N,fc);
-  $('#hicarrier').value=fc;
+  hiPlace();
   $('#hireport').innerHTML='Quietest 1600&nbsp;Hz slot is around <b>'+fc+' Hz</b>. The music there sits '+
     '<b>'+rel.toFixed(1)+' dB</b> relative to its 300–3800 Hz average — '+
     (rel<-6?'a genuine valley, data can ride with little notching.':'not a deep valley, so notch the band for a clean decode.');
@@ -701,27 +821,41 @@ function notchBand(f32,rate,fc){ // STFT brick-wall zero across [fc-900,fc+900],
   return out;
 }
 function rms(f32){let s=0;for(let i=0;i<f32.length;i++)s+=f32[i]*f32[i];return Math.sqrt(s/f32.length);}
+// Gentle music's chord roots (C3 A2 F2 G2, 4 s each, 16 s loop): sung letters take the root
+// of the chord they land on, so every overtone in a letter belongs to the harmony.
+const GENTLE_ROOTS=[48,45,41,43], SING_T0=4, SING_CHAR_S=0.5;
 async function hiMixBuild(){
   const fc=parseInt($('#hicarrier').value)||1500;
-  const gainDb=parseFloat($('#higain').value)||6;
-  const u8=new TextEncoder().encode($('#himsg').value);
+  const gainDb=parseFloat($('#higain').value); const gdb=isNaN(gainDb)?6:gainDb;
+  const msg=$('#himsg').value, u8=new TextEncoder().encode(msg);
   if(u8.length>170){$('#hiverifyout').textContent='message too long ('+u8.length+' B)';return;}
   const data=encodeMsg(u8,'N0CALL',fc,0,false);
-  let cover=$('#hinotch').checked?notchBand(hiCover,RATE,fc):hiCover.slice();
-  // scale data to sit gainDb above the music's in-band residual
+  if(!data) throw new Error('carrier '+fc+' Hz not encodable');
+  const fade=Math.round(0.012*RATE);                       // soft edges: no click at the burst
+  for(let i=0;i<fade;i++){const w=0.5-0.5*Math.cos(Math.PI*i/fade); data[i]*=w; data[data.length-1-i]*=w;}
+  let cover=$('#hinotch').checked&&fc+BW/2<RATE/2-1000?notchBand(hiCover,RATE,fc):hiCover.slice();
   const coverRms=Math.max(rms(cover),1e-5), dataRms=Math.max(rms(data),1e-5);
-  const target=coverRms*Math.pow(10,gainDb/20);
-  const g=target/dataRms;
-  // place data starting ~0.5s in; loop cover to cover the data span
-  const start=(RATE*0.5)|0, total=Math.max(cover.length,start+data.length+RATE);
+  const g=coverRms*Math.pow(10,gdb/20)/dataRms;
+  const start=(RATE*0.5)|0;
+  let sung=null;
+  if(hiGentle&&$('#hising').checked){
+    const n=visChars(msg).length, col=SING_CHAR_S/6;
+    const notes=Array.from({length:n},(_,k)=>midiHz(GENTLE_ROOTS[((SING_T0+k*SING_CHAR_S)/4|0)%4]));
+    sung=visibleText(msg,1500,RATE,{voice:'chime',col,notes});
+    const k=0.7*coverRms/Math.max(rms(sung),1e-5); for(let i=0;i<sung.length;i++) sung[i]*=k;
+  }
+  const s0=Math.round((SING_T0-SING_CHAR_S/6)*RATE);      // first glyph column lands on the 4 s chord change
+  const total=Math.max(cover.length,start+data.length+RATE,sung?s0+sung.length+RATE:0);
   const mix=new Float32Array(total);
-  for(let i=0;i<total;i++)mix[i]=cover.length?cover[i%cover.length]*0.9:0;
+  for(let i=0;i<total;i++)mix[i]=cover[i%cover.length]*0.9;
   for(let i=0;i<data.length;i++)mix[start+i]+=data[i]*g;
+  if(sung) for(let i=0;i<sung.length;i++)mix[s0+i]+=sung[i];
   let peak=0;for(let i=0;i<total;i++)peak=Math.max(peak,Math.abs(mix[i]));
-  if(peak>1)for(let i=0;i<total;i++)mix[i]/=peak;
+  if(peak>0.98)for(let i=0;i<total;i++)mix[i]*=0.98/peak;
   hiMix=mix;
   $('#hiplay').disabled=false;$('#hidl').disabled=false;$('#hiverify').disabled=false;
-  $('#hiverifyout').textContent='Mixed '+(data.length/RATE).toFixed(1)+'s of data into '+(total/RATE).toFixed(1)+'s of audio at '+fc+' Hz.';
+  $('#hiverifyout').textContent='Mixed '+(data.length/RATE).toFixed(1)+' s of data at '+fc+' Hz, '+gdb+' dB re the music'+
+    (sung?', with the message sung from '+SING_T0+' s':'')+' — '+(total/RATE).toFixed(1)+' s in all.';
 }
 
 // ---- bind ----
@@ -733,15 +867,16 @@ function bind(){
   $('#txbtn').onclick=async()=>{try{$('#txstatus').textContent='encoding…';const f=await txMake();playF32(f,RATE);
      $('#txstatus').textContent='transmitting '+(f.length/RATE).toFixed(1)+'s — point speaker at the receiver';}catch(e){$('#txstatus').textContent=e.message;}};
   $('#txdl').onclick=async()=>{try{const f=await txMake();$('#txstatus').textContent=await offerAudio(f,'rattlegram');}catch(e){$('#txstatus').textContent=e.message;}};
-  $('#higentle').onclick=()=>{$('#histatus').textContent='composing…';
+  $('#hiplace').onchange=()=>{if(hiMag)hiPlace();};
+  $('#higentle').onclick=()=>{hiGentle=true;$('#histatus').textContent='composing…';
     setTimeout(()=>{try{hiCover=gentleMusic();hiAnalyzeCover();$('#histatus').textContent='gentle music · '+(hiCover.length/RATE)+' s loop';}
       catch(e){$('#histatus').textContent=e.message;}},20);};
   $('#hifile').onchange=e=>{$('#hianalyze').disabled=!e.target.files.length;};
-  $('#hianalyze').onclick=async()=>{try{$('#histatus').textContent='analyzing…';await hiAnalyze($('#hifile').files[0]);$('#histatus').textContent='';}catch(e){$('#histatus').textContent=e.message;}};
+  $('#hianalyze').onclick=async()=>{hiGentle=false;try{$('#histatus').textContent='analyzing…';await hiAnalyze($('#hifile').files[0]);$('#histatus').textContent='';}catch(e){$('#histatus').textContent=e.message;}};
   $('#himix').onclick=async()=>{try{await hiMixBuild();}catch(e){$('#hiverifyout').textContent=e.message;}};
   $('#hiplay').onclick=()=>playF32(hiMix,RATE);
   $('#hidl').onclick=async()=>{$('#hiverifyout').textContent=await offerAudio(hiMix,'rattlegram-in-music');};
-  $('#hiverify').onclick=()=>{const r=decodeBuffer(hiMix);$('#hiverifyout').innerHTML=r.length?
+  $('#hiverify').onclick=()=>{const r=decodeAny(hiMix);$('#hiverifyout').innerHTML=r.length?
      '<span class="pill ok">decoded</span> ['+r[0].call+'] "'+(r[0].text||'').replace(/</g,'&lt;')+'" · '+r[0].flips+' bits corrected':
      '<span class="pill bad">no decode</span> — raise the data level or enable notch';};
 }
