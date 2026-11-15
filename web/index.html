@@ -130,14 +130,19 @@ label.filelink{display:inline;margin:0;text-transform:none;letter-spacing:0;font
   <section id="hide" class="card hide">
     <h2>Hide in audio</h2>
     <p class="hint">Rattlegram is a <b>loud, fragile</b> signal: inside its 1600&nbsp;Hz band it must be the stronger sound, so you can't bury it <i>under</i> louder music and still decode it. What you <i>can</i> do is make the two <b>coexist</b> — place the data where the music is quiet, or notch a hole for it.</p>
-    <label>Cover audio (music / ambience)</label>
+    <label>Cover audio</label>
+    <div class="btns">
+      <button id="higentle" class="go">♪ Use gentle music</button>
+      <span class="status">a soft piano-pad loop made right here in your browser — no upload, no licence</span>
+    </div>
+    <label>…or your own track (music / ambience)</label>
     <input type="file" id="hifile" accept="audio/*" style="font-family:var(--sans);padding:8px">
     <div class="btns">
       <button id="hianalyze" class="go" disabled>Analyze spectrum</button>
       <span class="status" id="histatus"></span>
     </div>
     <canvas id="hicanvas" width="820" height="150"></canvas>
-    <div class="cap" id="hireport">Upload a track to see its spectrum and the best place to drop a rattlegram.</div>
+    <div class="cap" id="hireport">Pick gentle music or upload a track to see its spectrum and the best place to drop a rattlegram.</div>
     <div id="hibuild" class="hide">
       <label>Message to hide</label>
       <textarea id="himsg">meet at the usual spot, 8pm</textarea>
@@ -636,9 +641,37 @@ function drawSpectrum(mag,rate,N,fc){
 }
 async function hiAnalyze(file){
   const ac=new (window.AudioContext||window.webkitAudioContext)({sampleRate:RATE});
-  const buf=await ac.decodeAudioData(await file.arrayBuffer());
+  let buf; try{ buf=await ac.decodeAudioData(await file.arrayBuffer()); } finally { ac.close(); }
   const ch=buf.getChannelData(0);
   hiCover=new Float32Array(ch.length); hiCover.set(ch);
+  hiAnalyzeCover();
+}
+// Gentle music, synthesised: 4 chords x 4 s (Cmaj7 Am7 Fmaj7 G6) as a soft pad,
+// plus a slow plucked arpeggio, low-passed. 16 s, loops seamlessly (every envelope
+// is periodic in the loop length), deterministic, nothing fetched.
+function gentleMusic(){
+  const CH=4, T=CH*4, n=T*RATE, out=new Float32Array(n), TAU=2*Math.PI;
+  const hz=m=>440*Math.pow(2,(m-69)/12);
+  const chords=[[48,55,59,64],[45,52,55,60],[41,48,52,57],[43,50,55,57]];
+  // pad: each chord fades in/out with a raised cosine spanning 6 s, centred on its 4 s slot
+  chords.forEach((ch,k)=>{const c=k*4+2;
+    ch.forEach((m,j)=>{const f=hz(m), f2=f*1.003, ph=j*1.7;
+      for(let i=0;i<n;i++){const t=i/RATE; let d=t-c; d-=T*Math.round(d/T);
+        if(Math.abs(d)>=3)continue; const w=0.5+0.5*Math.cos(Math.PI*d/3);
+        out[i]+=0.05*w*(Math.sin(TAU*f*t+ph)+0.6*Math.sin(TAU*f2*t)+0.15*Math.sin(TAU*2*f*t));}});});
+  // arpeggio: one pluck every 0.5 s through the chord, an octave up
+  const pat=[0,1,2,3,2,1,2,3];
+  for(let b=0;b<T*2;b++){const ch=chords[(b/8|0)%CH], f=hz(ch[pat[b%8]]+12), s0=b*RATE/2;
+    for(let i=0;i<RATE*2.5;i++){const t=i/RATE, e=Math.exp(-t*2.2)*Math.min(1,t*200);
+      out[(s0+i)%n]+=0.07*e*(Math.sin(TAU*f*t)+0.2*Math.sin(TAU*2*f*t));}}
+  // gentle one-pole low-pass ~1.5 kHz, run twice round the loop so it wraps cleanly
+  const a=Math.exp(-TAU*1500/RATE); let y=0;
+  for(let r=0;r<2;r++)for(let i=0;i<n;i++){y=a*y+(1-a)*out[i]; if(r)out[i]=y;}
+  let pk=0;for(let i=0;i<n;i++)pk=Math.max(pk,Math.abs(out[i]));
+  for(let i=0;i<n;i++)out[i]*=0.5/pk;
+  return out;
+}
+function hiAnalyzeCover(){
   const N=4096, mag=avgSpectrum(hiCover,RATE,N);
   const fc=bestCarrier(mag,RATE,N);
   const inBand=bandEnergy(mag,RATE,N,fc-BW/2,fc+BW/2);
@@ -650,7 +683,6 @@ async function hiAnalyze(file){
     '<b>'+rel.toFixed(1)+' dB</b> relative to its 300–3800 Hz average — '+
     (rel<-6?'a genuine valley, data can ride with little notching.':'not a deep valley, so notch the band for a clean decode.');
   $('#hibuild').classList.remove('hide');
-  ac.close();
 }
 function notchBand(f32,rate,fc){ // STFT brick-wall zero across [fc-900,fc+900], overlap-add
   const N=4096, hop=N/2, out=new Float32Array(f32.length);
@@ -701,6 +733,9 @@ function bind(){
   $('#txbtn').onclick=async()=>{try{$('#txstatus').textContent='encoding…';const f=await txMake();playF32(f,RATE);
      $('#txstatus').textContent='transmitting '+(f.length/RATE).toFixed(1)+'s — point speaker at the receiver';}catch(e){$('#txstatus').textContent=e.message;}};
   $('#txdl').onclick=async()=>{try{const f=await txMake();$('#txstatus').textContent=await offerAudio(f,'rattlegram');}catch(e){$('#txstatus').textContent=e.message;}};
+  $('#higentle').onclick=()=>{$('#histatus').textContent='composing…';
+    setTimeout(()=>{try{hiCover=gentleMusic();hiAnalyzeCover();$('#histatus').textContent='gentle music · '+(hiCover.length/RATE)+' s loop';}
+      catch(e){$('#histatus').textContent=e.message;}},20);};
   $('#hifile').onchange=e=>{$('#hianalyze').disabled=!e.target.files.length;};
   $('#hianalyze').onclick=async()=>{try{$('#histatus').textContent='analyzing…';await hiAnalyze($('#hifile').files[0]);$('#histatus').textContent='';}catch(e){$('#histatus').textContent=e.message;}};
   $('#himix').onclick=async()=>{try{await hiMixBuild();}catch(e){$('#hiverifyout').textContent=e.message;}};
