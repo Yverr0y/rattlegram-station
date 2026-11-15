@@ -97,7 +97,7 @@ label.filelink{display:inline;margin:0;text-transform:none;letter-spacing:0;font
     </div>
     <div class="meter"><i id="rxlevel"></i></div>
     <canvas id="rxwf" class="wf" role="img" aria-label="Live spectrogram of the microphone, 0 to 4 kHz; each decoded message is boxed and labelled where it was heard"></canvas>
-    <div class="cap">Spectrogram 0–4&nbsp;kHz, newest on the right. A rattlegram is the 1.6&nbsp;kHz-tall block: an amber “detecting…” box marks it the moment it is heard, and once it decodes it gets its message, where it was heard. <label for="rxfile" class="filelink">Or decode a recording…</label><input type="file" id="rxfile" accept="audio/*" class="hide"></div>
+    <div class="cap">Spectrogram 0–4&nbsp;kHz, newest on the right. A rattlegram is the 1.6&nbsp;kHz-tall block: an amber “detecting…” box marks it the moment it is heard, and once it decodes its message is written inside the box. Senders with “visible letters” on also draw the message itself in the audio, so you can read it straight off the waterfall. <label for="rxfile" class="filelink">Or decode a recording…</label><input type="file" id="rxfile" accept="audio/*" class="hide"></div>
     <label>Decrypt with passphrase (leave blank for plain messages)</label>
     <input type="text" id="rxkey" placeholder="shared passphrase">
     <div class="log" id="rxlog"></div>
@@ -116,6 +116,7 @@ label.filelink{display:inline;margin:0;text-transform:none;letter-spacing:0;font
     </div>
     <div class="chk"><input type="checkbox" id="txvox"><label>Leading noise for VOX radios (opens squelch before data)</label></div>
     <div class="chk"><input type="checkbox" id="txfancy"><label>Fancy header (paints callsign in the waterfall)</label></div>
+    <div class="chk"><input type="checkbox" id="txvis" checked><label>Write the message as visible letters after the burst (readable in any spectrogram; first 20 characters; never for encrypted messages)</label></div>
     <div class="chk"><input type="checkbox" id="txenc"><label>Encrypt (AES-GCM, base64) with a passphrase</label></div>
     <div id="txkeywrap" class="hide"><label>Passphrase</label><input type="text" id="txkey" placeholder="shared passphrase"></div>
     <div class="btns">
@@ -269,6 +270,43 @@ async function offerAudio(f32,base){
   const u=URL.createObjectURL(blob),a=document.createElement('a'); a.href=u;a.download=base+'.wav';a.click();
   return 'saved '+base+'.wav';
 }
+// ---- visible text: the message written as letters in any spectrogram ----
+// 5x8 column glyphs (bit0 = top row), printable ASCII 0x20..0x7E; anything else draws as '?'.
+const FONT5='000000000000005F00000007000700147F147F14242A7F2A12231308646236495620500008070300001C2241000041221C002A1C7F1C2A08083E080800807030000808080808000060600020100804023E5149453E00427F400072494949462141494D331814127F1027454545393C4A49493141211109073649494936464949291E0000140000004034000000081422411414141414004122140802015909063E415D594E7C1211127C7F494949363E414141227F4141413E7F494949417F090909013E414151737F0808087F00417F41002040413F017F081422417F404040407F021C027F7F0408107F3E4141413E7F090909063E4151215E7F09192946264949493203017F01033F4040403F1F2040201F3F4038403F631408146303047804036159494D43007F4141410204081020004141417F04020102044040404040000307080020545478407F284444383844444428384444287F385454541800087E090218A4A49C787F0804047800447D40002040403D007F1028440000417F40007C047804787C080404783844444438FC1824241818242418FC7C08040408485454542404043F44243C4040207C1C2040201C3C4030403C44281028444C9090907C4464544C440008364100000077000000413608000201020402'.match(/../g).map(h=>parseInt(h,16));
+const VIS={col:0.045, rowHz:90, rows:8, maxChars:20, gap:0.15, ramp:0.012};
+function glyphCols(ch){
+  if(ch==='…') return [0x40,0,0x40,0,0x40];
+  let c=ch.codePointAt(0); if(c<0x20||c>0x7E) c=0x3F;
+  return FONT5.slice((c-0x20)*5,(c-0x20)*5+5);
+}
+// Tones that draw `text` (first VIS.maxChars chars) as letters centred on fc Hz:
+// one sine per pixel row, gated per 45 ms glyph column with short ramps (no clicks).
+function visibleText(text, fc, rate){
+  let chars=[...text.replace(/\s+/g,' ').trim()];
+  if(chars.length>VIS.maxChars) chars=chars.slice(0,VIS.maxChars-1).concat('…');
+  const cols=[0];
+  for(const ch of chars){ cols.push(...glyphCols(ch),0); }
+  const per=Math.round(VIS.col*rate), n=cols.length*per, out=new Float32Array(n);
+  const slew=1/Math.max(1,VIS.ramp*rate);
+  for(let r=0;r<VIS.rows;r++){
+    const f=fc+((VIS.rows-1)/2-r)*VIS.rowHz, w=2*Math.PI*f/rate;
+    let env=0;
+    for(let i=0;i<n;i++){
+      const on=(cols[(i/per)|0]>>r)&1;
+      env+=on?Math.min(slew,1-env):-Math.min(slew,env);
+      if(env>0) out[i]+=env*Math.sin(w*i);
+    }
+  }
+  return out;
+}
+// burst + gap + visible text, text peak at 80% of the burst's peak.
+function withVisibleText(burst, text, fc, rate){
+  const vis=visibleText(text, fc, rate);
+  let pb=0, pv=0; for(const x of burst) pb=Math.max(pb,Math.abs(x)); for(const x of vis) pv=Math.max(pv,Math.abs(x));
+  const k=pv>0?0.8*pb/pv:0, gap=Math.round(VIS.gap*rate), out=new Float32Array(burst.length+gap+vis.length);
+  out.set(burst,0); for(let i=0;i<vis.length;i++) out[burst.length+gap+i]=vis[i]*k;
+  return out;
+}
 function playF32(f32,rate){
   const ac=new (window.AudioContext||window.webkitAudioContext)({sampleRate:rate});
   const b=ac.createBuffer(1,f32.length,rate); b.copyToChannel(f32,0);
@@ -356,7 +394,7 @@ function wfDraw(){
   const secs=w.cols*WF.hop/w.rate;
   for(let t=2;t<secs;t+=2){const x=X(now-t*w.rate); ctx.fillRect(x,H-5,.5,5); ctx.fillText('-'+t+'s',x+2,H-3);}
   for(const m of w.marks){
-    const x1=X(m.s1); if(x1<-200) continue;
+    const x1=X(m.s1); if(x1<0) continue;   // scrolled off: its tag would pin to the left edge
     const col=m.kind==='fail'?'#f85149':m.kind==='enc'?'#3fb950':m.kind==='ping'?'#9fb0c0':m.kind==='sync'?'#d29922':'#4cc9f0';
     ctx.strokeStyle=col; ctx.lineWidth=m.hot?3:1.5;
     if(m.kind==='fail'){ctx.setLineDash([4,3]); ctx.beginPath(); ctx.moveTo(x1,0); ctx.lineTo(x1,H); ctx.stroke(); ctx.setLineDash([]);}
@@ -365,6 +403,7 @@ function wfDraw(){
       ctx.fillStyle=m.kind==='sync'?'rgba(210,153,34,.08)':m.hot?'rgba(76,201,240,.18)':'rgba(76,201,240,.06)'; ctx.fillRect(x0,y0,x1-x0,y1-y0);
       if(m.kind==='sync')ctx.setLineDash([5,3]);
       ctx.strokeRect(x0,y0,x1-x0,y1-y0); ctx.setLineDash([]);
+      if(m.text) drawBoxText(ctx, m.text, x0, y0, x1-x0, y1-y0);
     }
     // label tag, Merlin-style: sits on the box, clamped into view
     ctx.font='600 12px system-ui,-apple-system,sans-serif';
@@ -375,6 +414,30 @@ function wfDraw(){
     ctx.fillStyle='#04202b'; ctx.fillText(txt,tx+6,ty+13);
   }
   if(w.live) w.raf=requestAnimationFrame(wfDraw);
+}
+// The decoded message written large inside its burst's box: wrapped, shrunk to fit, on a dark plate.
+function drawBoxText(ctx, text, x, y, w, h){
+  const pad=4, maxW=Math.max(20,w-2*pad), maxH=h-2*pad;
+  let size=20, lines=[];
+  for(; size>=10; size-=2){
+    ctx.font='700 '+size+'px system-ui,-apple-system,sans-serif';
+    lines=[]; let cur='';
+    for(const word of text.split(/\s+/)){
+      const t=cur?cur+' '+word:word;
+      if(ctx.measureText(t).width<=maxW||!cur) cur=t; else { lines.push(cur); cur=word; }
+    }
+    if(cur) lines.push(cur);
+    if(lines.length*size*1.15<=maxH && lines.every(l=>ctx.measureText(l).width<=maxW)) break;
+  }
+  size=Math.max(size,10);
+  const fit=Math.max(1,Math.floor(maxH/(size*1.15)));
+  if(lines.length>fit){ lines=lines.slice(0,fit); lines[fit-1]=lines[fit-1].replace(/.?$/,'…'); }
+  lines=lines.map(l=>{ while(l.length>1&&ctx.measureText(l).width>maxW) l=l.slice(0,-2)+'…'; return l; });
+  const bh=lines.length*size*1.15+2*pad, by=y+(h-bh)/2;
+  ctx.fillStyle='rgba(4,16,24,.78)'; ctx.fillRect(x+1,by,w-2,bh);
+  ctx.fillStyle='#ffffff'; ctx.textBaseline='top';
+  lines.forEach((l,i)=>ctx.fillText(l, x+pad, by+pad+i*size*1.15));
+  ctx.textBaseline='alphabetic';
 }
 function wfMark(m){
   wf.marks.push(m);
@@ -420,7 +483,7 @@ function rxFeed(s, x){
       const res={call:M.UTF8ToString(s.call),mode:M.HEAP32[s.modeP>>2],flips:M.HEAP32[s.flipP>>2],cfo:M.HEAPF32[s.cfoP>>2],
         text:r===2?'(ping)':toText(M.HEAPU8.subarray(s.pay,s.pay+Math.max(len,0))),ping:r===2};
       const s1=s.sample-REPORT_LAG_S*s.rate;
-      const m={s0:s1-BURST_S*s.rate,s1,f0:res.cfo-BW/2,f1:res.cfo+BW/2,kind:res.ping?'ping':'msg',label:(res.call||'?')+' · '+res.text,hot:false};
+      const m={s0:s1-BURST_S*s.rate,s1,f0:res.cfo-BW/2,f1:res.cfo+BW/2,kind:res.ping?'ping':'msg',label:res.call||'?',text:res.text,hot:false};
       wfMark(m); showRx(res,m);
     } else if(r===-1){
       wfMark({s0:s.sample,s1:s.sample,kind:'fail',label:'heard a burst, no decode',hot:false});
@@ -480,9 +543,9 @@ async function showRx(r, mark){
   if(!r.ping && /^E:[A-Za-z0-9+/]{48,}=*$/.test(r.text)){
     const pass=$('#rxkey').value;
     mark.kind='enc';
-    if(pass){ try{ body=await decryptMsg(r.text,pass); cls='msg enc'; tag='<span class="pill ok">decrypted</span>'; mark.label=(r.call||'?')+' · 🔓 '+body; }
-      catch(e){ body='[encrypted — wrong passphrase]'; cls='msg fail'; mark.label=(r.call||'?')+' · 🔒 wrong passphrase'; } }
-    else { body='[encrypted — enter passphrase above]'; cls='msg enc'; mark.label=(r.call||'?')+' · 🔒 encrypted'; }
+    if(pass){ try{ body=await decryptMsg(r.text,pass); cls='msg enc'; tag='<span class="pill ok">decrypted</span>'; mark.text='🔓 '+body; }
+      catch(e){ body='[encrypted — wrong passphrase]'; cls='msg fail'; mark.text='🔒 wrong passphrase'; } }
+    else { body='[encrypted — enter passphrase above]'; cls='msg enc'; mark.text='🔒 encrypted'; }
     if(wf&&!wf.live) wfDraw();
   }
   const el=document.createElement('div'); el.className=cls;
@@ -511,8 +574,12 @@ async function buildPayload(forEnc){
   return u8;
 }
 async function txMake(){
-  const u8=await buildPayload($('#txenc').checked);
-  return encodeMsg(u8,$('#txcall').value.toUpperCase(),parseInt($('#txcarrier').value)||1500,$('#txvox').checked,$('#txfancy').checked);
+  const enc=$('#txenc').checked, fc=parseInt($('#txcarrier').value)||1500;
+  const u8=await buildPayload(enc);
+  const f=encodeMsg(u8,$('#txcall').value.toUpperCase(),fc,$('#txvox').checked,$('#txfancy').checked);
+  // Plaintext only: drawing an encrypted message's text into the audio would publish it.
+  if(!f || enc || !$('#txvis').checked) return f;
+  return withVisibleText(f, $('#txmsg').value, fc, RATE);
 }
 
 // ================= HIDE IN AUDIO =================
